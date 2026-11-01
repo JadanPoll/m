@@ -530,7 +530,9 @@ class FireflyKeyboard:
         self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 8)
         self.inspect_button.pack(side="right", padx=3)
         tk.Label(title, textvariable=self.target_var, fg=MUTED, bg=BG,
-                 font=("Segoe UI", 8)).pack(side="right", padx=5)
+                 font=("Segoe UI", 8), width=24, anchor="e").pack(side="right", padx=3)
+        tk.Label(title, textvariable=self.guard_var, fg=CYAN, bg=BG,
+                 font=("Segoe UI", 8), width=43, anchor="e").pack(side="right", padx=3)
 
         if self.show_apps:
             quick = tk.Frame(self.root, bg=BG, padx=4, pady=1)
@@ -552,7 +554,7 @@ class FireflyKeyboard:
         # Keep predictions visible even when the app launcher is closed.
         suggest = tk.Frame(self.root, bg=BG, padx=5, pady=1)
         suggest.pack(fill="x")
-        tk.Label(suggest, text="WORDS", fg=CYAN, bg=BG,
+        tk.Label(suggest, text=f"WORDS {len(self.corpus_counts):,}", fg=CYAN, bg=BG,
                  font=("Segoe UI", 8, "bold")).pack(side="left", padx=3)
         for index in range(3):
             button = tk.Button(
@@ -572,17 +574,20 @@ class FireflyKeyboard:
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
 
-    def toggle_collapse(self) -> None:
-        self.collapsed = not self.collapsed
+    def _rebuild_dock(self) -> None:
         self._build()
         self._fit_window_to_content()
         self._apply_no_activate()
 
+    def toggle_collapse(self) -> None:
+        self.collapsed = not self.collapsed
+        # Rebuild after the current Tk Button.invoke returns; destroying a
+        # widget inside its own callback has caused remote instability before.
+        self.root.after_idle(self._rebuild_dock)
+
     def toggle_apps(self) -> None:
         self.show_apps = not self.show_apps
-        self._build()
-        self._fit_window_to_content()
-        self._apply_no_activate()
+        self.root.after_idle(self._rebuild_dock)
 
     @staticmethod
     def _chrome_executable() -> str | None:
@@ -638,6 +643,11 @@ class FireflyKeyboard:
             self.guard_var.set("Could not open " + name + ": " + str(error)[:90])
         if not self.collapsed:
             self._build_keys()
+        if self.show_apps:
+            # Reclaim the launcher row after a shortcut. Rebuild only after
+            # the original click callback has returned to the Tk event loop.
+            self.show_apps = False
+            self.root.after_idle(self._rebuild_dock)
 
     def _arm_desktop_click(self, side: str) -> None:
         """Advanced-only click interception; never hide Firefly in safe mode."""
