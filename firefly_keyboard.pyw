@@ -190,6 +190,38 @@ kernel32.GlobalLock.argtypes = (wintypes.HANDLE,)
 kernel32.GlobalLock.restype = ctypes.c_void_p
 kernel32.GlobalUnlock.argtypes = (wintypes.HANDLE,)
 kernel32.GlobalUnlock.restype = wintypes.BOOL
+# On 64-bit Windows, ctypes defaults undeclared return values and parameters
+# to 32-bit int. HWND/HMODULE/HHOOK must NEVER be truncated.
+kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+user32.GetForegroundWindow.argtypes = ()
+user32.GetForegroundWindow.restype = wintypes.HWND
+user32.GetAncestor.argtypes = (wintypes.HWND, wintypes.UINT)
+user32.GetAncestor.restype = wintypes.HWND
+user32.FindWindowW.argtypes = (wintypes.LPCWSTR, wintypes.LPCWSTR)
+user32.FindWindowW.restype = wintypes.HWND
+user32.GetWindowThreadProcessId.argtypes = (wintypes.HWND, ctypes.POINTER(wintypes.DWORD))
+user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+user32.GetGUIThreadInfo.argtypes = (wintypes.DWORD, ctypes.POINTER(GUITHREADINFO))
+user32.GetGUIThreadInfo.restype = wintypes.BOOL
+user32.SetForegroundWindow.argtypes = (wintypes.HWND,)
+user32.SetForegroundWindow.restype = wintypes.BOOL
+user32.SetFocus.argtypes = (wintypes.HWND,)
+user32.SetFocus.restype = wintypes.HWND
+user32.IsWindow.argtypes = (wintypes.HWND,)
+user32.IsWindow.restype = wintypes.BOOL
+user32.SetCursorPos.argtypes = (ctypes.c_int, ctypes.c_int)
+user32.SetCursorPos.restype = wintypes.BOOL
+user32.PostMessageW.argtypes = (wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+user32.PostMessageW.restype = wintypes.BOOL
+user32.GetWindowTextW.argtypes = (wintypes.HWND, wintypes.LPWSTR, ctypes.c_int)
+user32.GetWindowTextW.restype = ctypes.c_int
+user32.GetWindowRect.argtypes = (wintypes.HWND, ctypes.POINTER(RECT))
+user32.GetWindowRect.restype = wintypes.BOOL
+user32.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(RECT))
+user32.GetClientRect.restype = wintypes.BOOL
+user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
+user32.AttachThreadInput.restype = wintypes.BOOL
 
 
 def send_input(item: INPUT) -> bool:
@@ -577,25 +609,42 @@ class FireflyKeyboard:
         self.previous_word = learned
 
     def _update_suggestions(self) -> None:
+        """Small local backoff predictor: prefix > learned word pairs > word frequency.
+
+        Only offer corrections when completions do not dominate. Never
+        autocorrect silently: every prediction requires explicit selection.
+        """
         prefix = self.current_word.lower()
         common_rank = {word.lower(): index for index, word in enumerate(COMMON_WORDS)}
-        vocabulary = set(common_rank) | set(self.learned_words)
+        context = self.next_words.get(self.previous_word, {})
+        vocabulary = set(common_rank) | set(self.learned_words) | set(context)
+
+        def rank(word: str) -> tuple:
+            return (-context.get(word, 0), -self.learned_words.get(word, 0),
+                    common_rank.get(word, 99999), len(word), word)
 
         if prefix:
-            completions = [word for word in vocabulary if word.startswith(prefix) and word != prefix]
-            completions.sort(
-                key=lambda word: (-self.learned_words.get(word, 0), common_rank.get(word, 99999), len(word))
+            completions = sorted(
+                (word for word in vocabulary if word.startswith(prefix) and word != prefix),
+                key=rank,
             )
-            corrections = difflib.get_close_matches(prefix, vocabulary, n=5, cutoff=0.65)
-            strong_correction = (
-                corrections
-                and not completions
-                and difflib.SequenceMatcher(None, prefix, corrections[0]).ratio() >= 0.66
-            )
-            choices = (corrections[:1] if strong_correction else []) + completions[:2] + [prefix] + corrections
+            # A misspelling is less useful than a valid completion, and fuzzy
+            # guesses are dangerous for short command names in terminals.
+            corrections = []
+            if len(prefix) >= 3 and (len(completions) < 2):
+                corrections = difflib.get_close_matches(prefix, vocabulary, n=8, cutoff=0.65)
+                corrections = sorted(
+                    (word for word in corrections if word != prefix and word not in completions),
+                    key=lambda word: (
+                        -difflib.SequenceMatcher(None, prefix, word).ratio(),
+                        *rank(word),
+                    ),
+                )
+            choices = completions[:2] + corrections[:2] + [prefix] + completions[2:]
         else:
-            learned_next = self.next_words.get(self.previous_word, {})
-            choices = sorted(learned_next, key=lambda word: -learned_next[word]) + ["the", "I", "you"]
+            choices = sorted(context, key=rank) + [
+                word for word in ("the", "I", "you") if word.lower() not in context
+            ]
 
         unique = []
         for word in choices:
@@ -630,15 +679,11 @@ class FireflyKeyboard:
         typed = self.current_word
 
         def replace(hwnd: int) -> None:
+            # Keep deletion and insertion on the same captured destination;
+            # a delayed second send could land in a different window.
             for _ in typed:
                 direct_vk(hwnd, VK_BACK)
-            self.root.after(
-                70,
-                lambda: self._send_to_target(
-                    lambda: False,
-                    lambda target: direct_text(target, suggestion + " "),
-                ),
-            )
+            direct_text(hwnd, suggestion + " ")
 
         self._send_to_target(lambda: False, replace)
         self._learn_word(suggestion)
