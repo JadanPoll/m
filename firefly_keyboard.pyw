@@ -69,6 +69,8 @@ VK_RIGHT = 0x27
 VK_DOWN = 0x28
 VK_DELETE = 0x2E
 VK_CONTROL = 0x11
+VK_LWIN = 0x5B
+VK_R = 0x52
 VK_V = 0x56
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
@@ -277,6 +279,17 @@ def send_ctrl_chord(vk: int) -> bool:
     return user32.SendInput(4, events, ctypes.sizeof(INPUT)) == 4
 
 
+def show_run_dialog() -> bool:
+    """Open Windows' built-in Run dialog (Win+R), no launcher dependency."""
+    events = (INPUT * 4)(
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_LWIN, 0, 0, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_R, 0, 0, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_R, 0, KEYEVENTF_KEYUP, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_LWIN, 0, KEYEVENTF_KEYUP, 0, 0)),
+    )
+    return user32.SendInput(4, events, ctypes.sizeof(INPUT)) == 4
+
+
 def paste_clipboard() -> bool:
     return send_ctrl_chord(VK_V)
 
@@ -470,6 +483,7 @@ class FireflyKeyboard:
             ("POWERSHELL", lambda: self._launch_app("powershell")),
             ("FILES", lambda: self._launch_app("explorer")),
             ("NOTEPAD", lambda: self._launch_app("notepad")),
+            ("RUN", lambda: self._launch_app("run")),
             ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
             ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
         ]
@@ -515,6 +529,10 @@ class FireflyKeyboard:
             "explorer": ["explorer.exe"],
             "notepad": ["notepad.exe"],
         }
+        if name == "run":
+            self.guard_var.set("Windows Run opened" if show_run_dialog()
+                               else "Could not open Windows Run (input blocked)")
+            return
         if name not in commands:
             return
         self.ctrl_held = False
