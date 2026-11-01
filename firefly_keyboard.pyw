@@ -6,10 +6,13 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import faulthandler
 import difflib
 import json
 import os
 import subprocess
+import traceback
+import winreg
 import struct
 import sys
 import time
@@ -29,8 +32,8 @@ MUTED = "#91a4bd"
 CYAN = "#57d9ff"
 LIME = "#b7f34a"
 RED = "#ff6e78"
-ALPHA_IDLE = 0.24
-ALPHA_ACTIVE = 0.88
+ALPHA_IDLE = 0.84  # Was 0.24: appeared to vanish as soon as pointer left
+ALPHA_ACTIVE = 0.98
 
 COMMON_WORDS = tuple("""
 the to and a of in is it you that for on with this I be are as have at or
@@ -356,6 +359,7 @@ class FireflyKeyboard:
     def __init__(self) -> None:
         previous_foreground = user32.GetForegroundWindow()
         self.root = tk.Tk()
+        self.root.report_callback_exception = self._report_callback_exception
         self.root.title(APP_TITLE)
         self.root.configure(bg=BG)
         self.root.attributes("-topmost", True)
@@ -400,6 +404,7 @@ class FireflyKeyboard:
         self.pointer_suppress_up = False
         self.pointer_suppress_until = 0.0
         self.pointer_suppress_key: int | None = None
+        self.last_pointer_activation: tuple[tuple[int, int], float] | None = None
         self.close_armed_until = 0.0
         self.event_rows: list[str] = []
         self.last_native_at = 0
@@ -416,6 +421,13 @@ class FireflyKeyboard:
         self.root.after(250, self._update_target)
         self.root.after(300, self._poll_pointer)
         self.root.protocol("WM_DELETE_WINDOW", self.request_close)
+
+    def _report_callback_exception(self, exc_type, exc_value, exc_tb) -> None:
+        # Tk normally prints callback exceptions to stderr; pythonw hides them.
+        traceback.print_exception(exc_type, exc_value, exc_tb, file=sys.stderr)
+        if sys.stderr:
+            sys.stderr.flush()
+        self.guard_var.set("Firefly error — see startup.log in LOCALAPPDATA / FireflyDeskKeyboard")
 
     def _configure_window(self) -> None:
         work = RECT()
@@ -483,6 +495,7 @@ class FireflyKeyboard:
             ("POWERSHELL", lambda: self._launch_app("powershell")),
             ("FILES", lambda: self._launch_app("explorer")),
             ("NOTEPAD", lambda: self._launch_app("notepad")),
+            ("CHROME", lambda: self._launch_app("chrome")),
             ("RUN", lambda: self._launch_app("run")),
             ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
             ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
@@ -521,6 +534,29 @@ class FireflyKeyboard:
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
 
+    @staticmethod
+    def _chrome_executable() -> str | None:
+        # Chrome registers App Paths even when its folder is not on PATH.
+        key = r"Software\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe"
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, key) as entry:
+                    path = os.path.expandvars(winreg.QueryValueEx(entry, "")[0])
+                    if os.path.isfile(path):
+                        return path
+            except (FileNotFoundError, PermissionError, OSError):
+                pass
+        for base in (
+            os.environ.get("LOCALAPPDATA"),
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("PROGRAMFILES(X86)"),
+        ):
+            if base:
+                path = os.path.join(base, "Google", "Chrome", "Application", "chrome.exe")
+                if os.path.isfile(path):
+                    return path
+        return None
+
     def _launch_app(self, name: str) -> None:
         """Launch only the explicitly listed programs, never a user-supplied command."""
         commands = {
@@ -533,6 +569,12 @@ class FireflyKeyboard:
             self.guard_var.set("Windows Run opened" if show_run_dialog()
                                else "Could not open Windows Run (input blocked)")
             return
+        if name == "chrome":
+            executable = self._chrome_executable()
+            if executable is None:
+                self.guard_var.set("Chrome not found — install Chrome or use RUN")
+                return
+            commands[name] = [executable]
         if name not in commands:
             return
         self.ctrl_held = False
@@ -969,6 +1011,10 @@ class FireflyKeyboard:
             if self.pointer_suppress_up and w_param == WM_LBUTTONUP:
                 self.pointer_suppress_up = False
                 return 1
+            # WM_LBUTTONDBLCLK is the second press of a Windows double-click.
+            # It must not type the same on-screen key a second time.
+            if w_param == WM_LBUTTONDBLCLK and self.pointer_mode is None and self.pointer_inside:
+                return 1
             if time.monotonic() < self.pointer_suppress_until and w_param in (
                 WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP
             ):
@@ -1006,8 +1052,16 @@ class FireflyKeyboard:
                     0,
                     lambda value=direction, position=point: self._handle_mouse_motion(position, value),
                 )
-            elif w_param in (WM_LBUTTONDOWN, WM_LBUTTONDBLCLK):
-                self.root.after(0, lambda position=point: self._invoke_pointer_button(position))
+            elif w_param == WM_LBUTTONDOWN:
+                # The remote sometimes emits two mouse-down events for one OK.
+                # Debounce only repeat events at nearly the same position.
+                old = self.last_pointer_activation
+                now = time.monotonic()
+                if old is None or now - old[1] > 0.34 or (
+                    abs(point[0] - old[0][0]) + abs(point[1] - old[0][1]) > 7
+                ):
+                    self.last_pointer_activation = (point, now)
+                    self.root.after(0, lambda position=point: self._invoke_pointer_button(position))
                 return 1
             elif w_param == WM_LBUTTONUP:
                 return 1
@@ -1434,10 +1488,44 @@ class FireflyKeyboard:
 
 
 if __name__ == "__main__":
-    close_existing_firefly()
-    if "--replace-osk" in sys.argv:
-        close_windows_osk()
-    FireflyKeyboard().run()
+    # A pythonw-launched app otherwise loses every traceback, making a crash
+    # indistinguishable from a hidden window. Maintain one small per-run log.
+    log_file = None
+    try:
+        log_dir = os.path.join(
+            os.environ.get("LOCALAPPDATA", os.path.dirname(__file__)),
+            "FireflyDeskKeyboard",
+        )
+        os.makedirs(log_dir, exist_ok=True)
+        log_file = open(os.path.join(log_dir, "startup.log"), "w", encoding="utf-8", buffering=1)
+        sys.stderr = log_file
+        sys.stdout = log_file
+        faulthandler.enable(file=log_file)
+        print("Firefly starting: " + sys.executable, flush=True)
+    except OSError:
+        pass
+    try:
+        close_existing_firefly()
+        keyboard = FireflyKeyboard()
+        # Don't shut down Windows' fallback OSK before Firefly actually works.
+        if "--replace-osk" in sys.argv:
+            keyboard.root.after(1200, close_windows_osk)
+        keyboard.run()
+    except BaseException:
+        traceback.print_exc(file=sys.stderr)
+        if sys.stderr:
+            sys.stderr.flush()
+        # Emergency startup feedback without forcing a modal dialog.
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                None, "Firefly failed. See FireflyDeskKeyboard\\startup.log in LocalAppData.",
+                APP_TITLE, 0x10,
+            )
+        except Exception:
+            pass
+    finally:
+        if log_file is not None:
+            log_file.close()
 
 
 
