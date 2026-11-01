@@ -21,14 +21,18 @@ Startup and Tk callback errors are appended to `%LOCALAPPDATA%\FireflyDeskKeyboa
 
 The Illinois AnyWare service may disconnect idle sessions after 15 minutes and log them off one hour after disconnection. Save critical work to a persistent university-supported location.
 
-## Restored screen layout and transparency
+## Compact TV dock and transparency
 
-The idle keyboard is **24% opaque** again, becoming **88% opaque** when the remote pointer enters it. The keyboard now sizes itself from Tk's requested height after the app and prediction strips have been built, rather than reusing the old pre-shortcut 380px/49%-of-screen calculation. `SIZE` and `TOP/BOTTOM` also refit the window so **CTRL, HOME, END, PAGE, arrow, DELETE and PASTE** below ENTER remain visible when the AnyWare work area allows the full layout.
+The keyboard now has a **hard 34% work-area height budget**, including the Windows title bar; it cannot expand to cover half the vertical AnyWare screen. Header, word suggestions and letter keys are compact, and CTRL/HOME/END/PAGE/arrow/DELETE/PASTE are laid out before the letter rows so the footer stays reachable. Use **HIDE** to collapse the keyboard to a small **SHOW** strip whenever an underlying button is blocked, and **TOP/BOTTOM** to move that strip to the opposite edge. The collapsed strip includes an OSK fallback button. It does not require a global input hook or shut down Windows OSK.
+
+**APPS** reveals CMD, PowerShell, Files, Notepad, Chrome, RUN and OSK only when needed, then collapses after an app launch. This avoids permanently spending vertical space on launcher controls. The target and short input status remain visible in the title row.
+
+The translucent behavior is unchanged: **24% opaque at idle**, **88% opaque when the pointer enters**. Transparency affects appearance, *not hit testing*; use HIDE to actually reach a button behind the keyboard.
 
 ## Remote interaction
 
 - In **safe mode**, click/tap the visible Firefly keys using the remote-controlled pointer; the standard Windows input path handles remote clicks. The 300 ms identical-action guard mitigates accidentally doubled remote clicks, but can also suppress genuinely rapid repeated characters.
-- `SHIFT` is one-shot uppercase; its selection survives redraw, and it cancels sticky Ctrl so that typing cannot unintentionally interrupt a terminal with Ctrl+C.
+- `SHIFT` is **one-shot uppercase**: select SHIFT, then a letter. Shift updates its key labels **in place**, and capitalization is resolved when the letter is pressed. This fixes the earlier case where the label displayed uppercase but the command still sent lowercase. Shift and Ctrl cancel each other's sticky state to prevent unintended terminal shortcuts. `123` is still the symbol layout; physical held Shift+key combinations are not emulated by the Shift button.
 - `TOP/BOTTOM`, `SIZE`, `123`, `PASTE`, and word suggestions are available without global hooks.
 - If typing reports **Click the destination field first**, click the destination text field outside Firefly to establish focus. Safe mode does not silently move focus or send text to an unrelated app.
 - `INSPECT` now works in safe mode without hooks: it samples native virtual-key press transitions. The client may still discard or translate remote buttons before they reach Windows. D-pad navigation by polling is opt-in; it cannot suppress original arrow-key actions in the target application.
@@ -50,11 +54,11 @@ If the Citrix touch client exposes gestures, Citrix documents touch-hold-release
 
 ## Predictive text
 
-The three WORDS keys offer word completions and explicit spelling suggestions. The predictor now prioritizes **real prefix completions** (never the already-typed prefix), ranks by learned preceding-word context and word frequency, and considers common transposition typos when completions are scarce. **Suggestions are never auto-inserted.**
+The three WORDS keys now use a bundled **9,000-word English frequency dictionary** (`data/en_9k.txt`, approximately 115 KB), indexed into an in-memory **prefix tree** at startup. This gives common-word completion without a network request, administrative installation or large model. The on-screen label shows the number of dictionary words loaded, so missing data is visible. Prioritize corpus frequency, locally learned word usage and preceding-word context; use spelling correction only when exact completions are insufficient. **Suggestions are never auto-inserted.**
 
 When a suggestion *completes* the existing prefix, Firefly sends only the missing suffix plus space, preserving already typed letters. When the suggestion is a correction, it sends a single ordered Windows input batch of Backspaces and replacement characters. **Neither case silently clears the predictor or learns the suggestion if SendInput reports failure.** This also avoids posting individual WM_CHAR messages to modern applications that may ignore them. Because Windows can accept input without the target consuming it, verify the result in the actual text field.
 
-Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json` when Firefly closes normally. No cloud service is used. **Do not type secrets through the keyboard unless you accept that its local learning model can record the typed words.** The current model is intentionally lightweight; for larger vocabulary and typo correction, see [SymSpellPy](https://github.com/mammothb/symspellpy) and [Presage](https://presage.sourceforge.io/) as research directions, not installed dependencies.
+The bundled dictionary is an adapted subset of [hermitdave/FrequencyWords](https://github.com/hermitdave/FrequencyWords), whose source data is **CC BY-SA 4.0**; attribution and changes are recorded in `data/ATTRIBUTION.md`. Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json` when Firefly closes normally. No cloud service is used. **Do not type secrets through the keyboard unless you accept that its local learning model can record the typed words.** The current model is intentionally lightweight; for larger vocabulary and typo correction, see [SymSpellPy](https://github.com/mammothb/symspellpy) and [Presage](https://presage.sourceforge.io/) as research directions, not installed dependencies.
 
 ## Input diagnostics
 
