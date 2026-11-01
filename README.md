@@ -2,33 +2,47 @@
 
 A native, remote-oriented Windows on-screen keyboard for a Fire TV/remote-desktop pointer, D-pad, and OK button. No server, administrator rights, or network connection required; uses Python/Tkinter and Win32 APIs already available on the host.
 
-## Start and recovery
+## Critical: Illinois AnyWare / TV-remote safe mode (default)
 
-Double-click `Launch Firefly Keyboard.cmd`. It closes the legacy Windows On-Screen Keyboard window so that the two keyboards do not overlap, **without disabling or uninstalling Windows OSK**. You can reopen OSK normally if Firefly cannot receive input.
+This program is operating inside an **Illinois AnyWare remote session**, possibly controlled only by a TV remote. **Avoid losing access to the university desktop.** The regular `Launch Firefly Keyboard.cmd` starts in safe pointer mode:
 
-The close (×) control requires a second press within 2.5 seconds, preventing a remote pointer mistake from immediately shutting down the keyboard. A Windows single-instance mutex prevents repeated remote launcher activations from closing each other; a second launcher invocation leaves the existing keyboard running. Startup and callback errors are appended to **`%LOCALAPPDATA%\\FireflyDeskKeyboard\\startup.log`**, including under the no-console `pythonw` launcher. If it seems to vanish, check whether it is in one-shot click mode or inspect the log. Run `Debug Firefly Keyboard.cmd` for a visible Python traceback, without replacing Windows OSK. The regular launcher delays OSK replacement until Firefly has remained open for ten seconds.
+- **Does not close Windows On-Screen Keyboard (OSK)**, even when an old launcher accidentally passes `--replace-osk`.
+- **Does not install system-wide keyboard or mouse hooks**, capture remote arrow/OK events, or block the mouse elsewhere.
+- **Does not hide itself for one-shot mouse clicks**. The experimental `LEFT CLICK` / `RIGHT CLICK` conversion controls are deliberately unavailable in safe mode. Normal pointer clicks outside Firefly continue normally.
+- Never auto-terminates an existing Firefly instance. A repeat launch returns to the existing window.
+- Never forces foreground focus on pointer leave or to deliver text. Click the actual target text field first, then type.
+- Shows a `SAFE · POINTER` indicator. If D-pad-only input does not behave like a pointer, this safe default is intentionally less capable than hook mode. Do not enable advanced input unless another reliable recovery path exists.
+
+The **OSK** app shortcut starts Windows' built-in keyboard, independently of Firefly. The close (×) control requires two presses within 2.5 seconds to avoid accidental closure.
+
+Startup and Tk callback errors are appended to `%LOCALAPPDATA%\FireflyDeskKeyboard\startup.log`. Launch `Debug Firefly Keyboard.cmd` to display failures in a console without replacing OSK. An application can still crash; safe mode minimizes its effects on the rest of the remote session, not guarantees a crash-free Windows runtime.
+
+**Advanced features** (`--advanced-input` in a manually invoked command) install global input hooks for remote navigation and one-shot right-click conversion. They are intentionally **opt-in** and not recommended when Firefly is the only feasible input method. Microsoft's documentation warns that low-level input hooks can time out and be removed silently.
+
+The Illinois AnyWare service may disconnect idle sessions after 15 minutes and log them off one hour after disconnection. Save critical work to a persistent university-supported location.
 
 ## Remote interaction
 
-- Move with the D-pad or remote pointer; click/OK activates the highlighted key. A 75 ms guard limits duplicate navigation.
-- Duplicate identical key actions inside 300 ms are suppressed. This can also suppress *intentional* rapid identical presses; the guard is still a heuristic, not reliable physical-event deduplication.
-- Shift is **one-shot** for capitals, highlights when active, and preserves selection on redraw. Shift and Ctrl cancel each other's sticky state to avoid accidental Ctrl+C in a terminal.
-- Ctrl is one-shot for shortcuts. Be deliberate with Ctrl+C/Ctrl+D in a running terminal because those have real effects. Shift+Ctrl combinations aren't currently provided.
-- `TOP/BOTTOM` moves the keyboard. `SIZE` cycles three scale presets. `123` switches symbols.
-- `PASTE` reads clipboard text directly when possible; otherwise attempts Ctrl+V. The target must accept the text. Click a destination text field before typing.
-- The keyboard stays **84% opaque** while idle rather than fading to 24%, which previously looked like it had disappeared. Remote mouse double-click events and same-point repeated downs are filtered to reduce doubled characters.
+- In **safe mode**, click/tap the visible Firefly keys using the remote-controlled pointer; the standard Windows input path handles remote clicks. The 300 ms identical-action guard mitigates accidentally doubled remote clicks, but can also suppress genuinely rapid repeated characters.
+- `SHIFT` is one-shot uppercase; its selection survives redraw, and it cancels sticky Ctrl so that typing cannot unintentionally interrupt a terminal with Ctrl+C.
+- `TOP/BOTTOM`, `SIZE`, `123`, `PASTE`, and word suggestions are available without global hooks.
+- If typing reports **Click the destination field first**, click the destination text field outside Firefly to establish focus. Safe mode does not silently move focus or send text to an unrelated app.
+- The `INSPECT` hook-based diagnostic and D-pad interception are disabled in safe mode; they require `--advanced-input`.
+
 
 ## Quick launch
 
-Use the **APPS / DESKTOP** strip: `CMD`, `POWERSHELL`, `FILES` (Explorer), `NOTEPAD`, and **`CHROME`** open those applications in your Windows session. Chrome is located through Windows App Paths registration or conventional installation folders, including per-user installations. `RUN` opens Windows' built-in Win+R dialog to start *other* installed apps without bloating Firefly with another launcher. Newly opened programs can take a moment to become the tracked target.
+The **APPS** row opens `CMD`, `POWERSHELL`, `FILES`, `NOTEPAD`, `CHROME`, `RUN`, and **`OSK`** (Windows' On-Screen Keyboard). Chrome is resolved through Windows App Paths or typical install locations; if Chrome is not installed in the Illinois AnyWare image, Firefly reports that instead of failing. `RUN` opens Windows' native Run dialog.
 
-## Click anywhere (including behind Firefly)
+On shared/managed university desktops, installed apps and their permissions can differ from a personal Windows PC.
 
-Choose `LEFT CLICK` or `RIGHT CLICK` in the APPS / DESKTOP strip. The keyboard temporarily hides. Move the remote pointer to the desired location and click/OK **once**. Firefly converts that event into one left or right click, then restores itself.
 
-- ESC cancels the armed click. If no click arrives, Firefly restores itself automatically after 10 seconds. The activation press is briefly ignored so it cannot accidentally click through to the desktop.
-- The right-click mode converts the next physical left click or OK/Enter into a right click. It does **not** permanently remap the remote.
-- Click injection needs an unlocked, interactive Windows desktop and is limited by Windows integrity/security boundaries. It cannot operate on UAC/secure login screens.
+## Click anywhere (advanced only)
+
+Native pointer clicks already work **outside** the Firefly overlay and do not need mouse hooks. Firefly's custom one-shot LEFT/RIGHT CLICK conversion behind the overlay is hidden in **safe mode** because it would otherwise intercept global remote input and briefly withdraw the keyboard.
+
+If the Citrix touch client exposes gestures, Citrix documents touch-hold-release for right-click. That gesture may **not** be available through a physical Fire TV remote. Avoid enabling experimental hooks just to access right-click until a fallback input method exists.
+
 
 ## Predictive text
 
@@ -38,9 +52,10 @@ Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\Firefly
 
 ## Input diagnostics
 
-Click `INSPECT`, press an unknown remote button once, and read its native `VK`/`SCAN` values. The inspector is off by default; it keeps only three recent events in memory and never saves the event log. A browser reporting `key="Unidentified"` cannot reconstruct keys that were already discarded before reaching Windows.
+Safe mode preserves the existing Windows/remote-desktop event path and does not inspect or swallow global mouse/keyboard events. When advanced mode is deliberately enabled, `INSPECT` can capture native `VK` / `SCAN` codes, but a Citrix/Fire TV client may already have transformed or discarded the original remote button identity.
 
-Input now prefers native `SendInput` for foreground targets, with a targeted Win32 message fallback for compatible controls. Posted-message success **does not prove** the application consumed a character, particularly in modern windowless UI frameworks. Windows can deny focus/injection into elevated or secure applications. Verify text in the actual target before using any potentially destructive shortcut or command.
+Text uses `SendInput` when Firefly's target is verified foreground, with targeted message fallback for compatible controls. A posted Win32 message does not prove a modern application accepted text. Always verify in the actual field, particularly in a terminal.
+
 
 ## Useful upstream references
 
