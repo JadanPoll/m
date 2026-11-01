@@ -1280,55 +1280,56 @@ class FireflyKeyboard:
             return info.hwndFocus or target
         return target
 
-    def _send_to_target(self, callback, fallback) -> None:
-        """Send only to a verified target; avoid focus manipulation in safe mode."""
+    def _send_to_target(self, callback, fallback=None) -> bool:
+        """Inject only when target focus is verified; report unverified fallbacks."""
         target = self.last_external_hwnd
-        if target and user32.IsWindow(target):
-            focused = self._focused_control(target)
-            if self.safe_mode:
-                # Firefly is WS_EX_NOACTIVATE. The remote user must first click
-                # the receiving field. Never redirect focus or inject into an
-                # unrelated window as a side effect of typing.
-                if user32.GetForegroundWindow() != target:
-                    self.guard_var.set("Click the destination field first; input NOT sent")
-                    return
-                try:
-                    if callback():
-                        self.guard_var.set("Input sent to " + self._target_title(target))
-                    else:
-                        fallback(focused or target)
-                        self.guard_var.set("Posted to " + self._target_title(target) + " (unverified)")
-                except (OSError, ValueError, ctypes.ArgumentError) as error:
-                    self.guard_var.set("Input blocked: " + str(error)[:75])
-                return
-            if user32.IsIconic(target):
-                user32.ShowWindow(target, SW_RESTORE)
-            target_thread = user32.GetWindowThreadProcessId(target, None)
-            current_thread = kernel32.GetCurrentThreadId()
-            attached = bool(target_thread and target_thread != current_thread and
-                            user32.AttachThreadInput(current_thread, target_thread, True))
+        if not target or not user32.IsWindow(target):
+            self.guard_var.set("No target — click a text field in another window")
+            return False
+        focused = self._focused_control(target)
+        if self.safe_mode:
+            # A TV remote must never have its target changed automatically.
+            if user32.GetForegroundWindow() != target:
+                self.guard_var.set("Click the destination field first; nothing sent")
+                return False
             try:
-                user32.SetForegroundWindow(target)
-                if focused and focused != target:
-                    user32.SetFocus(focused)
-                if user32.GetForegroundWindow() != target:
-                    # SendInput is global: do not spray keys into another window.
+                if callback():
+                    self.guard_var.set("Input sent to " + self._target_title(target))
+                    return True
+                if fallback is not None:
                     fallback(focused or target)
-                    self.guard_var.set(
-                        f"Target not foreground; posted input to {self._target_title(target)} (unverified)"
-                    )
-                elif callback():
-                    self.guard_var.set(f"Input sent to {self._target_title(target)} · {self.blocked} blocked")
+                    self.guard_var.set("Posted to target (delivery unverified)")
                 else:
+                    self.guard_var.set("Input not delivered; target unchanged")
+            except (OSError, ValueError, ctypes.ArgumentError) as error:
+                self.guard_var.set("Input blocked: " + str(error)[:75])
+            return False
+
+        if user32.IsIconic(target):
+            user32.ShowWindow(target, SW_RESTORE)
+        target_thread = user32.GetWindowThreadProcessId(target, None)
+        current_thread = kernel32.GetCurrentThreadId()
+        attached = bool(target_thread and target_thread != current_thread and
+                        user32.AttachThreadInput(current_thread, target_thread, True))
+        try:
+            user32.SetForegroundWindow(target)
+            if focused and focused != target:
+                user32.SetFocus(focused)
+            if user32.GetForegroundWindow() != target:
+                if fallback is not None:
                     fallback(focused or target)
-                    self.guard_var.set(
-                        f"Fallback posted to {self._target_title(target)} (delivery unverified)"
-                    )
-            finally:
-                if attached:
-                    user32.AttachThreadInput(current_thread, target_thread, False)
-        else:
-            self.guard_var.set("No target yet — click a text field in another window")
+                self.guard_var.set("Target not foreground; input unverified")
+                return False
+            if callback():
+                self.guard_var.set("Input sent to " + self._target_title(target))
+                return True
+            if fallback is not None:
+                fallback(focused or target)
+            self.guard_var.set("Input delivery unverified")
+            return False
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_thread, target_thread, False)
 
     def _target_title(self, hwnd: int) -> str:
         title = ctypes.create_unicode_buffer(128)
