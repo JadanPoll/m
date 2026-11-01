@@ -21,13 +21,20 @@ Startup and Tk callback errors are appended to `%LOCALAPPDATA%\FireflyDeskKeyboa
 
 The Illinois AnyWare service may disconnect idle sessions after 15 minutes and log them off one hour after disconnection. Save critical work to a persistent university-supported location.
 
-## Compact TV dock and transparency
+## Movable TV dock and transparency
 
-The keyboard now has a **hard 34% work-area height budget**, including the Windows title bar; it cannot expand to cover half the vertical AnyWare screen. Header, word suggestions and letter keys are compact, and CTRL/HOME/END/PAGE/arrow/DELETE/PASTE are laid out before the letter rows so the footer stays reachable. Use **HIDE** to collapse the keyboard to a small **SHOW** strip whenever an underlying button is blocked, and **TOP/BOTTOM** to move that strip to the opposite edge. The collapsed strip includes an OSK fallback button. It does not require a global input hook or shut down Windows OSK.
+The previous 34%-height cap was too aggressive: it made the keyboard unnecessarily cramped and removed useful screen-positioning control. The keyboard now defaults to a **comfortable height around 43% of the AnyWare work area**, with a **46% maximum** (including the title bar, always under half the vertical desktop). Its keys still scale with `SIZE`.
 
-**APPS** reveals CMD, PowerShell, Files, Notepad, Chrome, RUN and OSK only when needed, then collapses after an app launch. This avoids permanently spending vertical space on launcher controls. The target and short input status remain visible in the title row.
+The title bar offers four separate controls:
 
-The translucent behavior is unchanged: **24% opaque at idle**, **88% opaque when the pointer enters**. Transparency affects appearance, *not hit testing*; use HIDE to actually reach a button behind the keyboard.
+- **MOVE ↑ / MOVE ↓**: shift the complete keyboard up/down **72 pixels per press**, with clamping so the entire window stays onscreen. These work even while collapsed.
+- **TOP/BOTTOM**: jump immediately between the two work-area edges and reset the incremental offset.
+- **HIDE / SHOW**: collapse to a thin, always-available control strip, then restore the full-size keyboard at its previous position.
+- **APPS**: reveal CMD, PowerShell, Files, Notepad, Chrome, Run and OSK only while needed.
+
+All movement uses normal window geometry, not global hooks, and doesn't affect the Windows fallback OSK.
+
+Idle opacity remains **24%** (hover **88%**). Transparency is only visual: the overlay continues to capture pointer clicks within its bounds, so MOVE or HIDE is the reliable way to reach a control behind it.
 
 ## Remote interaction
 
