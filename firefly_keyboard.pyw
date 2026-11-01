@@ -392,6 +392,9 @@ class FireflyKeyboard:
         self.last_action = ("", 0.0)
         self.blocked = 0
         self.inspecting = False
+        # Illinois AnyWare / TV-remote fallback: do not install hooks or
+        # consume OS-level input unless explicitly requested by an operator.
+        self.safe_mode = "--advanced-input" not in sys.argv
         self.preview_hover = "--hover-preview" in sys.argv
         self.preview_idle = "--idle-preview" in sys.argv
         self.pointer_inside = False
@@ -435,8 +438,9 @@ class FireflyKeyboard:
         self._configure_window()
         self._build()
         self.root.after(150, self._apply_no_activate)
-        self.root.after(180, self._install_navigation_hook)
-        self.root.after(190, self._install_mouse_hook)
+        if not self.safe_mode:
+            self.root.after(180, self._install_navigation_hook)
+            self.root.after(190, self._install_mouse_hook)
         self.root.after(250, self._update_target)
         self.root.after(300, self._poll_pointer)
         self.root.protocol("WM_DELETE_WINDOW", self.request_close)
@@ -490,6 +494,9 @@ class FireflyKeyboard:
         tk.Label(title, text="●", fg=LIME, bg=BG, font=("Segoe UI", 15, "bold")).pack(side="left")
         tk.Label(title, text="  FIREFLY DESK KEYBOARD", fg=INK, bg=BG,
                  font=("Segoe UI", 14, "bold")).pack(side="left")
+        if self.safe_mode:
+            tk.Label(title, text="SAFE · POINTER", fg=LIME, bg=BG,
+                     font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 0))
         tk.Label(title, textvariable=self.target_var, fg=MUTED, bg=BG,
                  font=("Segoe UI", 10)).pack(side="left", padx=22)
         self._tool_button(title, "×", self.request_close, RED, 4).pack(side="right", padx=3)
@@ -497,6 +504,8 @@ class FireflyKeyboard:
         self._tool_button(title, "SIZE", self.toggle_size, CYAN, 7).pack(side="right", padx=3)
         self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 10)
         self.inspect_button.pack(side="right", padx=3)
+        if self.safe_mode:
+            self.inspect_button.configure(state="disabled")
 
         status = tk.Frame(self.root, bg=PANEL, padx=16, pady=7)
         status.pack(fill="x", padx=12)
@@ -555,6 +564,8 @@ class FireflyKeyboard:
             button.pack(side="left", expand=True, fill="x", padx=4)
         self._update_suggestions()
 
+        if self.safe_mode:
+            self.inspect_var.set("SAFE MODE: no global hooks · normal pointer clicks · Windows OSK preserved")
         self.keyboard = tk.Frame(self.root, bg=BG, padx=10, pady=9)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
@@ -613,7 +624,12 @@ class FireflyKeyboard:
         self._build_keys()
 
     def _arm_desktop_click(self, side: str) -> None:
-        """Hide the overlay for one click anywhere, including beneath Firefly."""
+        """Advanced-only click interception; never hide Firefly in safe mode."""
+        if self.safe_mode:
+            self.guard_var.set(
+                "Safe mode: desktop click conversion off; use normal remote pointer"
+            )
+            return
         self.pointer_mode = side
         # The action which selected this mode may still be sending a second
         # mouse down / a synthetic double-click. Never click the desktop with it.
@@ -943,9 +959,12 @@ class FireflyKeyboard:
             self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_IDLE)
             self._apply_no_activate()
-            target = self.last_external_hwnd
-            if target and user32.IsWindow(target):
-                user32.SetForegroundWindow(target)
+            # Never force application focus from a mere pointer move. In
+            # AnyWare this can redirect a remote click or command unexpectedly.
+            if not self.safe_mode:
+                target = self.last_external_hwnd
+                if target and user32.IsWindow(target):
+                    user32.SetForegroundWindow(target)
 
     def _poll_pointer(self) -> None:
         try:
@@ -1315,10 +1334,26 @@ class FireflyKeyboard:
         return target
 
     def _send_to_target(self, callback, fallback) -> None:
-        """Restore the target focus, inject input, then use a direct fallback."""
+        """Send only to a verified target; avoid focus manipulation in safe mode."""
         target = self.last_external_hwnd
         if target and user32.IsWindow(target):
             focused = self._focused_control(target)
+            if self.safe_mode:
+                # Firefly is WS_EX_NOACTIVATE. The remote user must first click
+                # the receiving field. Never redirect focus or inject into an
+                # unrelated window as a side effect of typing.
+                if user32.GetForegroundWindow() != target:
+                    self.guard_var.set("Click the destination field first; input NOT sent")
+                    return
+                try:
+                    if callback():
+                        self.guard_var.set("Input sent to " + self._target_title(target))
+                    else:
+                        fallback(focused or target)
+                        self.guard_var.set("Posted to " + self._target_title(target) + " (unverified)")
+                except (OSError, ValueError, ctypes.ArgumentError) as error:
+                    self.guard_var.set("Input blocked: " + str(error)[:75])
+                return
             if user32.IsIconic(target):
                 user32.ShowWindow(target, SW_RESTORE)
             target_thread = user32.GetWindowThreadProcessId(target, None)
@@ -1379,6 +1414,9 @@ class FireflyKeyboard:
         self.root.after(500, self._update_target)
 
     def toggle_inspector(self) -> None:
+        if self.safe_mode:
+            self.guard_var.set("Inspector requires --advanced-input; safe mode is active")
+            return
         if self.inspecting:
             self.inspecting = False
             if self.hook:
@@ -1547,11 +1585,10 @@ if __name__ == "__main__":
             if prior:
                 user32.ShowWindow(prior, SW_RESTORE)
         else:
-            close_existing_firefly()
+            # Do not close another overlay, terminate a previous process, or
+            # remove Windows OSK. Even legacy --replace-osk is ignored: a
+            # remote-only AnyWare user must retain their fallback keyboard.
             keyboard = FireflyKeyboard()
-            # Don't shut down Windows' fallback OSK before Firefly actually works.
-            if "--replace-osk" in sys.argv:
-                keyboard.root.after(10000, close_windows_osk)
             keyboard.run()
             print("Firefly mainloop exited normally", flush=True)
     except BaseException:
