@@ -415,6 +415,11 @@ class FireflyKeyboard:
         self.previous_word = ""
         self.learned_words: dict[str, int] = {}
         self.next_words: dict[str, dict[str, int]] = {}
+        self.corpus_counts: dict[str, int] = {}
+        self.completion_index: dict[str, list[str]] = {}
+        self.words_by_first: dict[str, list[str]] = {}
+        self.letter_buttons: dict[str, tk.Button] = {}
+        self.shift_button: tk.Button | None = None
         local_data = os.environ.get("LOCALAPPDATA", os.path.dirname(__file__))
         self.learning_path = os.path.join(local_data, "FireflyDeskKeyboard", "language.json")
         self.nav_buttons: list[tk.Button] = []
@@ -714,6 +719,35 @@ class FireflyKeyboard:
                             self.learned_words[word] = max(1, self.learned_words.get(word, 0))
             except (OSError, UnicodeError):
                 pass
+        self._load_offline_dictionary()
+
+    def _load_offline_dictionary(self) -> None:
+        """Build a small prefix tree from a frequency-sorted local word list."""
+        path = os.path.join(os.path.dirname(__file__), "data", "en_9k.txt")
+        try:
+            with open(path, "r", encoding="utf-8") as stream:
+                for line in stream:
+                    pair = line.strip().split()
+                    if len(pair) != 2 or not pair[0].isascii() or not pair[0].isalpha():
+                        continue
+                    word = pair[0].lower()
+                    try:
+                        count = int(pair[1])
+                    except ValueError:
+                        continue
+                    if word in self.corpus_counts:
+                        continue
+                    self.corpus_counts[word] = count
+                    self.words_by_first.setdefault(word[0], []).append(word)
+                    # Top 16 per prefix; rank order already follows corpus
+                    # frequency. No costly scan of 9k entries per keystroke.
+                    for n in range(1, min(len(word), 18) + 1):
+                        choices = self.completion_index.setdefault(word[:n], [])
+                        if len(choices) < 16:
+                            choices.append(word)
+        except OSError:
+            # Never fail startup when a single optional data file is absent.
+            pass
 
     def _save_language_model(self) -> None:
         try:
@@ -734,46 +768,48 @@ class FireflyKeyboard:
         self.previous_word = learned
 
     def _update_suggestions(self) -> None:
-        """Rank completions before corrections, using local contextual counts."""
+        """Frequency-ranked corpus prefix tree plus personal bigram adaptation."""
         prefix = self.current_word.casefold()
-        common_rank = {word.casefold(): index for index, word in enumerate(COMMON_WORDS)}
         context = self.next_words.get(self.previous_word, {})
-        vocabulary = set(common_rank) | set(self.learned_words) | set(context)
+        common_rank = {word.casefold(): idx for idx, word in enumerate(COMMON_WORDS)}
 
         def rank(word: str) -> tuple:
             return (-context.get(word, 0), -self.learned_words.get(word, 0),
+                    -self.corpus_counts.get(word, 0),
                     common_rank.get(word, 99999), len(word), word)
 
         if prefix:
-            # A completion always beats a fuzzy correction, and we never offer
-            # the already-typed prefix as a redundant "suggestion".
-            completions = sorted(
-                (word for word in vocabulary if word.startswith(prefix) and word != prefix),
-                key=rank,
-            )
-            choices = completions[:3]
+            static = self.completion_index.get(prefix, ())
+            personal = [w for w in self.learned_words if w.startswith(prefix) and w != prefix]
+            contextual = [w for w in context if w.startswith(prefix) and w != prefix]
+            builtin = [w for w in common_rank if w.startswith(prefix) and w != prefix]
+            candidates = set(static) | set(personal) | set(contextual) | set(builtin)
+            candidates.discard(prefix)
+            choices = sorted(candidates, key=rank)[:3]
             if len(choices) < 3 and len(prefix) >= 3:
-                # Bound fuzzy matching to plausible candidates so typing is
-                # responsive even if Windows has a large user dictionary.
-                candidates = [
-                    word for word in vocabulary
-                    if abs(len(word) - len(prefix)) <= 2 and
-                    word[:1] == prefix[:1] and word not in completions and word != prefix
+                # Fuzzy correction only when there aren't enough completions.
+                # Use a first-letter/length bucket instead of the full corpus.
+                pool = [
+                    w for w in self.words_by_first.get(prefix[0], ())
+                    if abs(len(w) - len(prefix)) <= 2 and w not in candidates
                 ]
-                close = difflib.get_close_matches(prefix, candidates, n=6, cutoff=0.60)
-                close.sort(key=lambda word: (
-                    -difflib.SequenceMatcher(None, prefix, word).ratio(), *rank(word)
+                pool += [w for w in self.learned_words
+                         if w[:1] == prefix[:1] and abs(len(w) - len(prefix)) <= 2]
+                close = difflib.get_close_matches(prefix, pool, n=6, cutoff=0.60)
+                close.sort(key=lambda w: (
+                    -difflib.SequenceMatcher(None, prefix, w).ratio(), *rank(w)
                 ))
                 choices.extend(close[:3 - len(choices)])
         else:
             choices = sorted(context, key=rank)[:3]
             if len(choices) < 3:
-                choices += [word for word in ("the", "I", "you") if word.casefold() not in
-                            {entry.casefold() for entry in choices}]
+                defaults = ("the", "I", "you")
+                choices.extend(w for w in defaults if w.casefold() not in
+                               {item.casefold() for item in choices})
 
         unique = []
         for word in choices:
-            if word and word.casefold() not in {entry.casefold() for entry in unique}:
+            if word and word.casefold() not in {item.casefold() for item in unique}:
                 shown = ("I" if word.casefold() == "i" else
                          word.capitalize() if self.current_word[:1].isupper() else word)
                 unique.append(shown)
@@ -781,12 +817,10 @@ class FireflyKeyboard:
                 break
         self.suggestions = unique
         for index, button in enumerate(self.suggestion_buttons):
-            available = index < len(unique)
-            button.configure(
-                text=unique[index] if available else "—",
-                state="normal" if available else "disabled",
-                disabledforeground=MUTED,
-            )
+            exists = index < len(unique)
+            button.configure(text=unique[index] if exists else "—",
+                             state="normal" if exists else "disabled",
+                             disabledforeground=MUTED)
 
     def _track_text(self, text: str) -> None:
         for char in text:
