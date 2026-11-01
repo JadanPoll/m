@@ -101,6 +101,7 @@ REMOTE_VK_NAMES = {
     VK_PRIOR: "PAGE UP", VK_NEXT: "PAGE DOWN", VK_END: "END",
     VK_HOME: "HOME", VK_LEFT: "LEFT", VK_UP: "UP",
     VK_RIGHT: "RIGHT", VK_DOWN: "DOWN", VK_DELETE: "DELETE",
+    0xE7: "UNICODE PACKET",
 }
 ERROR_ALREADY_EXISTS = 183
 WS_EX_NOACTIVATE = 0x08000000
@@ -525,6 +526,7 @@ class FireflyKeyboard:
         self.capture_mouse_point: tuple[int, int] | None = None
         self.capture_pointer_accum = [0, 0]
         self.capture_pointer_last_log = 0.0
+        self.capture_last_pointer_click_at = 0.0
         self.nav_buttons: list[tk.Button] = []
         self.nav_selected: tk.Button | None = None
         # All remote-input sampling happens on Tk's main thread; no ctypes
@@ -1805,7 +1807,19 @@ class FireflyKeyboard:
                 name = chr(vk)
             else:
                 name = "UNKNOWN"
-        self._record_capture_line(f"{state:<4} VK=0x{vk:02X} ({vk:3d}) {name}")
+        note = ""
+        now = time.monotonic()
+        if vk == 0x01:
+            self.capture_last_pointer_click_at = now
+        elif now - self.capture_last_pointer_click_at < 0.12:
+            try:
+                if self._point_over_keyboard(tuple(self.root.winfo_pointerxy())):
+                    note = " [LIKELY FIREFLY OUTPUT]"
+            except tk.TclError:
+                pass
+        self._record_capture_line(
+            f"{state:<4} VK=0x{vk:02X} ({vk:3d}) {name}{note}"
+        )
 
     def save_screenshot_bmp(self, path: str) -> None:
         """Capture this window to BMP and PNG without external packages."""
@@ -1965,6 +1979,7 @@ if __name__ == "__main__":
             kernel32.CloseHandle(singleton)
         if log_file is not None:
             log_file.close()
+
 
 
 
