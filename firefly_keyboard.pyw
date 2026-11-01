@@ -108,10 +108,17 @@ WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
 LLMHF_INJECTED = 0x00000001
+MOUSEEVENTF_MOVE = 0x0001
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_VIRTUALDESK = 0x4000
+MOUSEEVENTF_ABSOLUTE = 0x8000
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 WM_CHAR = 0x0102
 WM_PASTE = 0x0302
 WM_CLOSE = 0x0010
@@ -188,6 +195,8 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.SendInput.restype = wintypes.UINT
+user32.GetSystemMetrics.argtypes = (ctypes.c_int,)
+user32.GetSystemMetrics.restype = ctypes.c_int
 # Keep input handling in the Tk event loop. Python ctypes Win32 hook
 # callbacks can re-enter Tk while its thread state is detached, and may crash
 # the interpreter (PyEval_RestoreThread). Do not register low-level hooks.
@@ -269,6 +278,60 @@ def send_mouse_click(right: bool = False) -> bool:
         INPUT(type=0, mi=MOUSEINPUT(0, 0, 0, up, 0, 0)),
     )
     return user32.SendInput(2, events, ctypes.sizeof(INPUT)) == 2
+
+
+def plan_drag_events(start: tuple[int, int], end: tuple[int, int],
+                     virtual_rect: tuple[int, int, int, int]) -> list[tuple[int, int, int]]:
+    """Plan a single bounded SendInput drag, never a latched mouse button.
+
+    Pure planner so the coordinate/press/release sequence is testable without
+    touching the real remote desktop. Absolute coordinates span the virtual
+    desktop, including negative-origin secondary monitors.
+    """
+    left, top, width, height = virtual_rect
+    if width < 2 or height < 2:
+        raise ValueError("Invalid virtual desktop dimensions")
+
+    def absolute(x: int, y: int) -> tuple[int, int]:
+        px = max(0, min(65535, round((x - left) * 65535 / (width - 1))))
+        py = max(0, min(65535, round((y - top) * 65535 / (height - 1))))
+        return px, py
+
+    move_flags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
+    ax, ay = absolute(*start)
+    result = [(ax, ay, move_flags), (0, 0, MOUSEEVENTF_LEFTDOWN)]
+    # Supply discrete intermediate moves so applications can observe a drag,
+    # with all events in one atomic SendInput batch (no held state between UI
+    # callbacks and no Python timer that might strand a pressed button).
+    for step in range(1, 13):
+        fraction = step / 12
+        x = round(start[0] + (end[0] - start[0]) * fraction)
+        y = round(start[1] + (end[1] - start[1]) * fraction)
+        bx, by = absolute(x, y)
+        result.append((bx, by, move_flags))
+    result.append((0, 0, MOUSEEVENTF_LEFTUP))
+    return result
+
+
+def send_mouse_drag(start: tuple[int, int], end: tuple[int, int]) -> bool:
+    """Attempt a short drag without ever leaving the button held asynchronously."""
+    virtual_rect = tuple(int(user32.GetSystemMetrics(metric)) for metric in
+                         (SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+                          SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN))
+    try:
+        plan = plan_drag_events(start, end, virtual_rect)
+    except ValueError:
+        return False
+    batch = (INPUT * len(plan))(*[
+        INPUT(type=0, mi=MOUSEINPUT(dx, dy, 0, flags, 0, 0))
+        for dx, dy, flags in plan
+    ])
+    sent = user32.SendInput(len(batch), batch, ctypes.sizeof(INPUT))
+    if sent != len(batch):
+        # Defensive release if Windows accepted a partial sequence.
+        send_input(INPUT(type=0, mi=MOUSEINPUT(0, 0, 0, MOUSEEVENTF_LEFTUP, 0, 0)))
+        return False
+    return True
 
 
 def send_word_replacement(typed: str, suggestion: str) -> bool:
@@ -728,6 +791,82 @@ class FireflyKeyboard:
             # the original click callback has returned to the Tk event loop.
             self.show_apps = False
             self.root.after_idle(self._rebuild_dock)
+
+    def _cancel_mouse_targeting(self) -> None:
+        """Invalidate any countdown; preserve an already captured drag start."""
+        self.mouse_target_seq += 1
+        self.mouse_target_kind = None
+
+    def _clear_mouse_target(self) -> None:
+        self._cancel_mouse_targeting()
+        self.drag_start_point = None
+        self.guard_var.set("Mouse targeting cancelled; no click or drag sent")
+
+    def _arm_mouse_target(self, kind: str) -> None:
+        """Capture remote-pointer hover after countdown, without global hooks.
+
+        Physical clicks remain untouched. All operations are opt-in and never
+        require holding a synthetic mouse button while the TV remote moves.
+        """
+        if kind not in ("left", "right", "drag_start", "drag_end"):
+            return
+        if kind == "drag_end" and self.drag_start_point is None:
+            self.guard_var.set("First choose DRAG FROM; move pointer during countdown")
+            return
+        self._cancel_mouse_targeting()
+        token = self.mouse_target_seq
+        self.mouse_target_kind = kind
+        self.guard_var.set(
+            f"{kind.replace('_', ' ').upper()} armed: move pointer to target, "
+            f"capture in {self.mouse_target_delay_ms / 1000:g} seconds. CANCEL stops it."
+        )
+        self.root.after(self.mouse_target_delay_ms,
+                        lambda v=token: self._complete_mouse_target(v))
+
+    def _point_over_keyboard(self, point: tuple[int, int]) -> bool:
+        """Reject synthetic clicks aimed at Firefly, including the title bar."""
+        left = self.root.winfo_rootx()
+        top = self.root.winfo_rooty()
+        return (left <= point[0] < left + self.root.winfo_width() and
+                top - 40 <= point[1] < top + self.root.winfo_height())
+
+    def _complete_mouse_target(self, token: int) -> None:
+        if token != self.mouse_target_seq or not self.mouse_target_kind:
+            return
+        kind = self.mouse_target_kind
+        self.mouse_target_kind = None
+        try:
+            point = tuple(int(v) for v in self.root.winfo_pointerxy())
+            if self._point_over_keyboard(point):
+                self.guard_var.set(
+                    "Mouse action cancelled: pointer was still over Firefly"
+                )
+                return
+            if kind == "drag_start":
+                self.drag_start_point = point
+                self.guard_var.set(
+                    f"Drag start {point}. Choose DRAG TO, then move to destination."
+                )
+                return
+            if kind == "drag_end":
+                start = self.drag_start_point
+                self.drag_start_point = None
+                if start is None or (abs(point[0] - start[0]) +
+                                     abs(point[1] - start[1]) < 12):
+                    self.guard_var.set("Drag cancelled: two distinct points required")
+                    return
+                if not send_mouse_drag(start, point):
+                    self.guard_var.set("Drag blocked or not accepted by Windows")
+                else:
+                    self.guard_var.set("Drag events sent to desktop (result unverified)")
+            else:
+                result = send_mouse_click(right=(kind == "right"))
+                self.guard_var.set(
+                    f"{kind.upper()} click sent at {point} (result unverified)"
+                    if result else "Mouse click blocked by Windows"
+                )
+        except (OSError, ValueError, ctypes.ArgumentError, tk.TclError) as error:
+            self.guard_var.set("Mouse operation cancelled: " + str(error)[:70])
 
     def _arm_desktop_click(self, side: str) -> None:
         """Advanced-only click interception; never hide Firefly in safe mode."""
