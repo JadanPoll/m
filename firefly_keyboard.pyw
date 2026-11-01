@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import ctypes
 from ctypes import wintypes
+import difflib
+import json
 import os
 import struct
 import sys
@@ -16,6 +18,7 @@ import zlib
 
 APP_TITLE = "Firefly Desk Keyboard"
 GUARD_MS = 300
+NAV_GUARD_MS = 75
 BG = "#07111f"
 PANEL = "#0d1a2b"
 KEY = "#17304c"
@@ -301,6 +304,11 @@ class FireflyKeyboard:
         self.suggestion_buttons: list[tk.Button] = []
         self.suggestions: list[str] = []
         self.current_word = ""
+        self.previous_word = ""
+        self.learned_words: dict[str, int] = {}
+        self.next_words: dict[str, dict[str, int]] = {}
+        local_data = os.environ.get("LOCALAPPDATA", os.path.dirname(__file__))
+        self.learning_path = os.path.join(local_data, "FireflyDeskKeyboard", "language.json")
         self.nav_buttons: list[tk.Button] = []
         self.nav_selected: tk.Button | None = None
         self.hook = None
@@ -312,6 +320,8 @@ class FireflyKeyboard:
         self.last_mouse_point: tuple[int, int] | None = None
         self.mouse_motion_accum = [0, 0]
         self.last_mouse_motion_at = 0.0
+        self.last_nav_action = ("", 0.0)
+        self.remote_nav_until = 0.0
         self.close_armed_until = 0.0
         self.event_rows: list[str] = []
         self.last_native_at = 0
@@ -319,6 +329,7 @@ class FireflyKeyboard:
         self.target_var = tk.StringVar(value="Target: detecting…")
         self.guard_var = tk.StringVar(value=f"{GUARD_MS} ms guard · 0 blocked")
         self.inspect_var = tk.StringVar(value="Inspector off — click INSPECT, then press the unknown remote button")
+        self._load_language_model()
         self._configure_window()
         self._build()
         self.root.after(150, self._apply_no_activate)
@@ -422,28 +433,99 @@ class FireflyKeyboard:
         button.bind("<Enter>", lambda _event, item=button: self._select_nav_button(item), add="+")
         return button
 
+    def _load_language_model(self) -> None:
+        try:
+            with open(self.learning_path, "r", encoding="utf-8") as file:
+                saved = json.load(file)
+            self.learned_words = {
+                str(word).lower(): int(count)
+                for word, count in saved.get("words", {}).items()
+            }
+            self.next_words = {
+                str(previous).lower(): {
+                    str(word).lower(): int(count) for word, count in choices.items()
+                }
+                for previous, choices in saved.get("next", {}).items()
+            }
+        except (OSError, ValueError, TypeError):
+            pass
+
+        # Include words the user has already added to Windows' spelling
+        # dictionary. Microsoft documents these as UTF-16 text files.
+        spelling = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Spelling")
+        for language in ("en-US", "neutral"):
+            path = os.path.join(spelling, language, "default.dic")
+            try:
+                with open(path, "r", encoding="utf-16") as file:
+                    for line in file:
+                        word = line.strip().lower()
+                        if word.isalpha() and len(word) > 1:
+                            self.learned_words[word] = max(1, self.learned_words.get(word, 0))
+            except (OSError, UnicodeError):
+                pass
+
+    def _save_language_model(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self.learning_path), exist_ok=True)
+            with open(self.learning_path, "w", encoding="utf-8") as file:
+                json.dump({"words": self.learned_words, "next": self.next_words}, file)
+        except OSError:
+            pass
+
+    def _learn_word(self, word: str) -> None:
+        learned = word.strip("'").lower()
+        if len(learned) < 2 or not learned.replace("'", "").isalpha():
+            return
+        self.learned_words[learned] = self.learned_words.get(learned, 0) + 1
+        if self.previous_word:
+            choices = self.next_words.setdefault(self.previous_word, {})
+            choices[learned] = choices.get(learned, 0) + 1
+        self.previous_word = learned
+
     def _update_suggestions(self) -> None:
         prefix = self.current_word.lower()
+        common_rank = {word.lower(): index for index, word in enumerate(COMMON_WORDS)}
+        vocabulary = set(common_rank) | set(self.learned_words)
+
         if prefix:
-            choices = [word for word in COMMON_WORDS if word.lower().startswith(prefix)]
+            completions = [word for word in vocabulary if word.startswith(prefix) and word != prefix]
+            completions.sort(
+                key=lambda word: (-self.learned_words.get(word, 0), common_rank.get(word, 99999), len(word))
+            )
+            corrections = difflib.get_close_matches(prefix, vocabulary, n=5, cutoff=0.65)
+            strong_correction = (
+                corrections
+                and not completions
+                and difflib.SequenceMatcher(None, prefix, corrections[0]).ratio() >= 0.66
+            )
+            choices = (corrections[:1] if strong_correction else []) + completions[:2] + [prefix] + corrections
         else:
-            choices = ["the", "I", "you"]
+            learned_next = self.next_words.get(self.previous_word, {})
+            choices = sorted(learned_next, key=lambda word: -learned_next[word]) + ["the", "I", "you"]
+
         unique = []
-        for word in choices + ["the", "I", "you", "and", "to"]:
-            if word.lower() not in {item.lower() for item in unique}:
+        for word in choices:
+            if word and word.lower() not in {item.lower() for item in unique}:
                 shown = word.capitalize() if self.current_word[:1].isupper() else word
                 unique.append(shown)
             if len(unique) == 3:
                 break
         self.suggestions = unique
         for index, button in enumerate(self.suggestion_buttons):
-            button.configure(text=unique[index] if index < len(unique) else "…")
+            available = index < len(unique)
+            button.configure(
+                text=unique[index] if available else "—",
+                state="normal" if available else "disabled",
+                disabledforeground=MUTED,
+            )
 
     def _track_text(self, text: str) -> None:
         for char in text:
             if char.isalpha() or (char == "'" and self.current_word):
                 self.current_word += char
             else:
+                if self.current_word:
+                    self._learn_word(self.current_word)
                 self.current_word = ""
         self._update_suggestions()
 
@@ -465,6 +547,7 @@ class FireflyKeyboard:
             )
 
         self._send_to_target(lambda: False, replace)
+        self._learn_word(suggestion)
         self.current_word = ""
         self._update_suggestions()
 
@@ -568,14 +651,18 @@ class FireflyKeyboard:
             self._select_nav_button(self.nav_buttons[index])
 
     def _handle_mouse_motion(self, point: tuple[int, int], direction: str | None) -> None:
+        if direction:
+            self._navigate(direction)
+            return
         button = self._button_at_point(*point)
         if button:
             self._select_nav_button(button)
-        elif direction:
-            self.activate("mouse-nav:" + direction, lambda: self._move_nav(direction))
 
     def _invoke_pointer_button(self, point: tuple[int, int]) -> None:
-        button = self._button_at_point(*point) or self.nav_selected
+        if time.monotonic() < self.remote_nav_until and self.nav_selected:
+            button = self.nav_selected
+        else:
+            button = self._button_at_point(*point) or self.nav_selected
         if button and button.winfo_exists():
             self._select_nav_button(button)
             button.invoke()
@@ -625,7 +712,10 @@ class FireflyKeyboard:
             pass
 
     def _move_nav(self, direction: str) -> None:
-        buttons = [button for button in self.nav_buttons if button.winfo_exists() and button.winfo_ismapped()]
+        buttons = [
+            button for button in self.nav_buttons
+            if button.winfo_exists() and button.winfo_ismapped() and str(button.cget("state")) != "disabled"
+        ]
         if not buttons:
             return
         if self.nav_selected not in buttons:
@@ -655,12 +745,21 @@ class FireflyKeyboard:
         if choices:
             self._select_nav_button(min(choices, key=lambda item: item[0])[1])
 
+    def _navigate(self, direction: str) -> None:
+        now = time.perf_counter() * 1000
+        last_direction, last_at = self.last_nav_action
+        if direction == last_direction and now - last_at < NAV_GUARD_MS:
+            return
+        self.last_nav_action = (direction, now)
+        self.remote_nav_until = time.monotonic() + 1.4
+        self._move_nav(direction)
+
     def _on_navigation_key(self, event):
         if not self.pointer_inside:
             return None
         key = event.keysym
         if key in ("Left", "Right", "Up", "Down"):
-            self.activate("nav:" + key, lambda: self._move_nav(key))
+            self._navigate(key)
             return "break"
         if key in ("Return", "KP_Enter", "space") and self.nav_selected:
             self.nav_selected.invoke()
@@ -697,7 +796,7 @@ class FireflyKeyboard:
                     self.mouse_motion_accum[0] += dx
                     self.mouse_motion_accum[1] += dy
                     ax, ay = self.mouse_motion_accum
-                    if max(abs(ax), abs(ay)) >= 5:
+                    if max(abs(ax), abs(ay)) >= 2:
                         if abs(ax) >= abs(ay):
                             direction = "Right" if ax > 0 else "Left"
                         else:
@@ -718,7 +817,7 @@ class FireflyKeyboard:
         directions = {VK_LEFT: "Left", VK_RIGHT: "Right", VK_UP: "Up", VK_DOWN: "Down"}
         if vk in directions:
             direction = directions[vk]
-            self.activate("nav:" + direction, lambda: self._move_nav(direction))
+            self._navigate(direction)
         elif vk in (VK_RETURN, VK_SPACE) and self.nav_selected:
             self.nav_selected.invoke()
 
@@ -781,8 +880,35 @@ class FireflyKeyboard:
         click = MSLLHOOKSTRUCT(pt=point, mouseData=0, flags=0, time=0, dwExtraInfo=0)
         self._mouse_navigation_hook(HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click))
 
+    def _run_fast_navigation_self_test(self) -> None:
+        """Exercise four rapid same-direction remote taps: q -> t."""
+        self.preview_hover = True
+        self.pointer_inside = True
+        first = next((item for item in self.nav_buttons if item.cget("text") == "q"), None)
+        if not first:
+            return
+        self._select_nav_button(first)
+        for index in range(4):
+            self.root.after(index * 90, lambda: self._navigate("Right"))
+        self.root.after(430, lambda: self.nav_selected.invoke() if self.nav_selected else None)
+
     def _run_suggestion_self_test(self) -> None:
         self.current_word = "hel"
+        self._update_suggestions()
+        self._accept_suggestion(0)
+
+    def _run_unknown_word_self_test(self) -> None:
+        self.current_word = "xylophonic"
+        self._update_suggestions()
+        self._accept_suggestion(0)
+
+    def _run_long_suggestion_self_test(self) -> None:
+        self.current_word = "recommen"
+        self._update_suggestions()
+        self._accept_suggestion(0)
+
+    def _run_correction_self_test(self) -> None:
+        self.current_word = "teh"
         self._update_suggestions()
         self._accept_suggestion(0)
 
@@ -839,6 +965,8 @@ class FireflyKeyboard:
             vk = int(action.split(":", 1)[1])
             self._send_vk_action(vk)
             if vk in (VK_RETURN, VK_TAB, VK_ESCAPE):
+                if self.current_word:
+                    self._learn_word(self.current_word)
                 self.current_word = ""
                 self._update_suggestions()
         else:
@@ -1013,6 +1141,7 @@ class FireflyKeyboard:
         user32.ReleaseDC(hwnd, src_dc)
 
     def close(self) -> None:
+        self._save_language_model()
         if self.hook:
             user32.UnhookWindowsHookEx(self.hook)
         if self.nav_hook:
@@ -1048,8 +1177,20 @@ class FireflyKeyboard:
         if "--hover-click-self-test" in sys.argv:
             self.root.after(650, self._run_hover_click_self_test)
             self.root.after(2200, self.close)
+        if "--fast-nav-self-test" in sys.argv:
+            self.root.after(650, self._run_fast_navigation_self_test)
+            self.root.after(2500, self.close)
         if "--suggestion-self-test" in sys.argv:
             self.root.after(650, self._run_suggestion_self_test)
+            self.root.after(2200, self.close)
+        if "--unknown-word-self-test" in sys.argv:
+            self.root.after(650, self._run_unknown_word_self_test)
+            self.root.after(2200, self.close)
+        if "--long-suggestion-self-test" in sys.argv:
+            self.root.after(650, self._run_long_suggestion_self_test)
+            self.root.after(2200, self.close)
+        if "--correction-self-test" in sys.argv:
+            self.root.after(650, self._run_correction_self_test)
             self.root.after(2200, self.close)
         if "--paste-self-test" in sys.argv:
             self.root.after(650, self._run_paste_self_test)
@@ -1065,6 +1206,7 @@ if __name__ == "__main__":
     if "--replace-osk" in sys.argv:
         close_windows_osk()
     FireflyKeyboard().run()
+
 
 
 
