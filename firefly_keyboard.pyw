@@ -27,6 +27,9 @@ MOVE_MENU_GUARD_MS = 360
 OPTION_GUARD_MS = 550
 REPEAT_OPTION_GUARD_MS = 140
 NAV_GUARD_MS = 75
+POINTER_NAV_GUARD_MS = 160
+POINTER_NAV_THRESHOLD_PX = 4
+GLOBAL_OK_GUARD_MS = 120
 BG = "#07111f"
 PANEL = "#0d1a2b"
 KEY = "#17304c"
@@ -45,6 +48,20 @@ MOVE_STEP_PX = 72
 def clamp_dock_top(requested: int, work_top: int, work_bottom: int, outer_height: int) -> int:
     """Keep the entire movable keyboard visible inside the remote desktop."""
     return max(work_top, min(requested, max(work_top, work_bottom - outer_height)))
+
+
+def pointer_nav_direction(dx: int, dy: int) -> str | None:
+    """Recognize the axis-aligned pointer bursts produced by the TV D-pad."""
+    ax, ay = abs(dx), abs(dy)
+    if max(ax, ay) < POINTER_NAV_THRESHOLD_PX:
+        return None
+    # Remote captures are strongly axis aligned. Requiring 3:1 avoids turning
+    # ordinary diagonal mouse movement into unwanted keyboard snapping.
+    if ax >= ay * 3:
+        return "Right" if dx > 0 else "Left"
+    if ay >= ax * 3:
+        return "Down" if dy > 0 else "Up"
+    return None
 
 
 COMMON_WORDS = tuple("""
@@ -537,6 +554,12 @@ class FireflyKeyboard:
         self.last_mouse_motion_at = 0.0
         self.last_nav_action = ("", 0.0)
         self.remote_nav_until = 0.0
+        self.last_pointer_nav_at = 0.0
+        self.pointer_warp_until = 0.0
+        self.pointer_warp_point: tuple[int, int] | None = None
+        self.last_ok_press: tuple[tuple[int, int] | None, float] = (None, 0.0)
+        self.suppress_ok_once = False
+        self.suppress_ok_until = 0.0
         self.pointer_mode: str | None = None
         self.pointer_arm_after = 0.0
         self.pointer_suppress_up = False
@@ -560,6 +583,8 @@ class FireflyKeyboard:
         self._configure_window()
         self._build()
         self._fit_window_to_content()
+        self.root.bind_all("<Motion>", self._on_pointer_motion_event, add="+")
+        self.root.bind_all("<ButtonPress-1>", self._on_pointer_press, add="+")
         self.root.after(150, self._apply_no_activate)
         # A single Tk timer samples remote input even in safe mode, but
         # navigation dispatch is opt-in. Polling does not swallow OS events.
@@ -1272,6 +1297,77 @@ class FireflyKeyboard:
         if button:
             self._select_nav_button(button)
 
+    def _on_pointer_motion_event(self, event) -> None:
+        """Convert captured axis-only remote pointer bursts into one grid step."""
+        point = (int(event.x_root), int(event.y_root))
+        now = time.monotonic()
+        if self.capture_mode or self.inspecting:
+            self.last_mouse_point = point
+            return
+        if not self.pointer_inside:
+            self._set_pointer_inside(True)
+            self.last_mouse_point = point
+            return
+        if (now < self.pointer_warp_until and self.pointer_warp_point and
+                abs(point[0] - self.pointer_warp_point[0]) <= 5 and
+                abs(point[1] - self.pointer_warp_point[1]) <= 5):
+            self.last_mouse_point = point
+            return
+        previous = self.last_mouse_point
+        self.last_mouse_point = point
+        if previous is None:
+            return
+        if now - self.last_mouse_motion_at > 0.30:
+            self.mouse_motion_accum = [0, 0]
+        self.last_mouse_motion_at = now
+        self.mouse_motion_accum[0] += point[0] - previous[0]
+        self.mouse_motion_accum[1] += point[1] - previous[1]
+        direction = pointer_nav_direction(*self.mouse_motion_accum)
+        if direction is None:
+            return
+        if (now - self.last_pointer_nav_at) * 1000 < POINTER_NAV_GUARD_MS:
+            return
+        self.last_pointer_nav_at = now
+        self.mouse_motion_accum = [0, 0]
+        self._navigate(direction)
+        self._snap_pointer_to_selected()
+
+    def _snap_pointer_to_selected(self) -> None:
+        """Place the real pointer on the selected key so physical OK activates it."""
+        button = self.nav_selected
+        if button is None or not button.winfo_exists() or not button.winfo_ismapped():
+            return
+        self.root.update_idletasks()
+        point = (
+            button.winfo_rootx() + button.winfo_width() // 2,
+            button.winfo_rooty() + button.winfo_height() // 2,
+        )
+        self.pointer_warp_point = point
+        self.pointer_warp_until = time.monotonic() + 0.12
+        self.last_mouse_point = point
+        user32.SetCursorPos(*point)
+
+    def _on_pointer_press(self, event) -> None:
+        """Suppress one duplicate remote OK press anywhere inside Firefly."""
+        point = (int(event.x_root), int(event.y_root))
+        now_ms = time.perf_counter() * 1000
+        previous_point, previous_at = self.last_ok_press
+        duplicate = bool(
+            previous_point is not None and
+            now_ms - previous_at < GLOBAL_OK_GUARD_MS and
+            abs(point[0] - previous_point[0]) <= 18 and
+            abs(point[1] - previous_point[1]) <= 18
+        )
+        self.last_ok_press = (point, now_ms)
+        if duplicate:
+            self.suppress_ok_once = True
+            self.suppress_ok_until = time.monotonic() + 0.35
+            self.blocked += 1
+            self.guard_var.set(
+                f"Global OK debounce ({self.blocked} duplicate"
+                f"{'s' if self.blocked != 1 else ''} blocked)"
+            )
+
     def _invoke_pointer_button(self, point: tuple[int, int]) -> None:
         if time.monotonic() < self.remote_nav_until and self.nav_selected:
             button = self.nav_selected
@@ -1300,7 +1396,7 @@ class FireflyKeyboard:
             self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_ACTIVE)
             self._select_pointer_button()
-            self.guard_var.set("REMOTE DIRECTIONS navigate · CLICK/OK presses")
+            self.guard_var.set("D-PAD SNAP navigates · OK presses selected key")
         else:
             self.last_mouse_point = None
             self.mouse_motion_accum = [0, 0]
@@ -1506,6 +1602,30 @@ class FireflyKeyboard:
             self.root.after(index * 90, lambda: self._navigate("Right"))
         self.root.after(430, lambda: self.nav_selected.invoke() if self.nav_selected else None)
 
+    def _run_dpad_snap_self_test(self) -> None:
+        """Verify one axis-only pointer burst selects and snaps q -> w."""
+        self.capture_mode = False
+        self.inspecting = False
+        self.pointer_inside = True
+        self.root.update_idletasks()
+        first = next((item for item in self.nav_buttons if item.cget("text") == "q"), None)
+        expected = next((item for item in self.nav_buttons if item.cget("text") == "w"), None)
+        if first is None or expected is None:
+            print("DPAD SNAP SELF-TEST FAIL: keys unavailable", flush=True)
+            return
+        self._select_nav_button(first)
+        start = (
+            first.winfo_rootx() + first.winfo_width() // 2,
+            first.winfo_rooty() + first.winfo_height() // 2,
+        )
+        self.last_mouse_point = start
+        self.last_mouse_motion_at = time.monotonic()
+        event = type("MotionEvent", (), {"x_root": start[0] + 8, "y_root": start[1]})()
+        self._on_pointer_motion_event(event)
+        passed = self.nav_selected is expected
+        self.guard_var.set("D-PAD SNAP SELF-TEST " + ("PASS" if passed else "FAIL"))
+        print("DPAD SNAP SELF-TEST " + ("PASS" if passed else "FAIL"), flush=True)
+
     def _run_suggestion_self_test(self) -> None:
         self.current_word = "hel"
         self._update_suggestions()
@@ -1535,6 +1655,10 @@ class FireflyKeyboard:
         self.root.after(180, lambda: self.key_action("x"))
 
     def activate(self, signature: str, action) -> None:
+        if getattr(self, "suppress_ok_once", False):
+            self.suppress_ok_once = False
+            if time.monotonic() < getattr(self, "suppress_ok_until", 0.0):
+                return
         now = time.perf_counter() * 1000
         # Menu actions need a longer per-control guard than normal typing;
         # the old last-action-only check allowed duplicated controls through
@@ -1906,6 +2030,9 @@ class FireflyKeyboard:
         if "--fast-nav-self-test" in sys.argv:
             self.root.after(650, self._run_fast_navigation_self_test)
             self.root.after(2500, self.close)
+        if "--dpad-snap-self-test" in sys.argv:
+            self.root.after(650, self._run_dpad_snap_self_test)
+            self.root.after(1500, self.close)
         if "--suggestion-self-test" in sys.argv:
             self.root.after(650, self._run_suggestion_self_test)
             self.root.after(2200, self.close)
@@ -1979,6 +2106,7 @@ if __name__ == "__main__":
             kernel32.CloseHandle(singleton)
         if log_file is not None:
             log_file.close()
+
 
 
 
