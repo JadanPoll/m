@@ -76,6 +76,7 @@ WM_LBUTTONUP = 0x0202
 WM_CHAR = 0x0102
 WM_PASTE = 0x0302
 WM_CLOSE = 0x0010
+CF_UNICODETEXT = 13
 SRCCOPY = 0x00CC0020
 DIB_RGB_COLORS = 0
 SPI_GETWORKAREA = 0x0030
@@ -88,8 +89,19 @@ class KEYBDINPUT(ctypes.Structure):
                 ("dwExtraInfo", ULONG_PTR)]
 
 
+class MOUSEINPUT(ctypes.Structure):
+    _fields_ = [("dx", wintypes.LONG), ("dy", wintypes.LONG),
+                ("mouseData", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                ("time", wintypes.DWORD), ("dwExtraInfo", ULONG_PTR)]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    _fields_ = [("uMsg", wintypes.DWORD), ("wParamL", wintypes.WORD),
+                ("wParamH", wintypes.WORD)]
+
+
 class INPUT_UNION(ctypes.Union):
-    _fields_ = [("ki", KEYBDINPUT)]
+    _fields_ = [("mi", MOUSEINPUT), ("ki", KEYBDINPUT), ("hi", HARDWAREINPUT)]
 
 
 class INPUT(ctypes.Structure):
@@ -144,6 +156,18 @@ user32.CallNextHookEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM
 user32.CallNextHookEx.restype = LRESULT
 user32.UnhookWindowsHookEx.argtypes = (wintypes.HANDLE,)
 user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+user32.OpenClipboard.argtypes = (wintypes.HWND,)
+user32.OpenClipboard.restype = wintypes.BOOL
+user32.GetClipboardData.argtypes = (wintypes.UINT,)
+user32.GetClipboardData.restype = wintypes.HANDLE
+user32.CloseClipboard.argtypes = ()
+user32.CloseClipboard.restype = wintypes.BOOL
+user32.VkKeyScanW.argtypes = (wintypes.WCHAR,)
+user32.VkKeyScanW.restype = ctypes.c_short
+kernel32.GlobalLock.argtypes = (wintypes.HANDLE,)
+kernel32.GlobalLock.restype = ctypes.c_void_p
+kernel32.GlobalUnlock.argtypes = (wintypes.HANDLE,)
+kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 
 def send_input(item: INPUT) -> bool:
@@ -167,14 +191,37 @@ def send_vk(vk: int) -> bool:
     return down and up
 
 
+def send_ctrl_chord(vk: int) -> bool:
+    events = (INPUT * 4)(
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, 0, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(vk, 0, 0, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(vk, 0, KEYEVENTF_KEYUP, 0, 0)),
+        INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0, 0)),
+    )
+    return user32.SendInput(4, events, ctypes.sizeof(INPUT)) == 4
+
+
 def paste_clipboard() -> bool:
-    results = [
-        send_input(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, 0, 0, 0))),
-        send_input(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_V, 0, 0, 0, 0))),
-        send_input(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_V, 0, KEYEVENTF_KEYUP, 0, 0))),
-        send_input(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0, 0))),
-    ]
-    return all(results)
+    return send_ctrl_chord(VK_V)
+
+
+def read_clipboard_text() -> str | None:
+    """Read Unicode clipboard text without Tk's RDP-fragile clipboard bridge."""
+    if not user32.OpenClipboard(None):
+        return None
+    try:
+        handle = user32.GetClipboardData(CF_UNICODETEXT)
+        if not handle:
+            return None
+        pointer = kernel32.GlobalLock(handle)
+        if not pointer:
+            return None
+        try:
+            return ctypes.wstring_at(pointer)
+        finally:
+            kernel32.GlobalUnlock(handle)
+    finally:
+        user32.CloseClipboard()
 
 
 def direct_text(hwnd: int, text: str) -> None:
@@ -188,6 +235,13 @@ def direct_text(hwnd: int, text: str) -> None:
 def direct_vk(hwnd: int, vk: int) -> None:
     user32.PostMessageW(hwnd, WM_KEYDOWN, vk, 1)
     user32.PostMessageW(hwnd, WM_KEYUP, vk, 0xC0000001)
+
+
+def direct_ctrl_chord(hwnd: int, vk: int) -> None:
+    user32.PostMessageW(hwnd, WM_KEYDOWN, VK_CONTROL, 1)
+    user32.PostMessageW(hwnd, WM_KEYDOWN, vk, 1)
+    user32.PostMessageW(hwnd, WM_KEYUP, vk, 0xC0000001)
+    user32.PostMessageW(hwnd, WM_KEYUP, VK_CONTROL, 0xC0000001)
 
 
 def close_windows_osk() -> None:
@@ -222,6 +276,7 @@ class FireflyKeyboard:
         self.scale = 0.82
         self.dock_top = False
         self.shifted = False
+        self.ctrl_held = False
         self.symbols = False
         self.last_action = ("", 0.0)
         self.blocked = 0
@@ -388,11 +443,15 @@ class FireflyKeyboard:
 
         utility = tk.Frame(self.keyboard, bg=BG)
         utility.pack(fill="x", pady=(4, 0))
-        utilities = [("HOME", VK_HOME), ("END", VK_END), ("PG▲", VK_PRIOR), ("PG▼", VK_NEXT),
+        utilities = [("CTRL●" if self.ctrl_held else "CTRL", "CTRL"),
+                     ("HOME", VK_HOME), ("END", VK_END), ("PG▲", VK_PRIOR), ("PG▼", VK_NEXT),
                      ("▲", VK_UP), ("▼", VK_DOWN), ("DELETE", VK_DELETE), ("PASTE", "PASTE")]
         for label, action in utilities:
+            active_modifier = action == "CTRL" and self.ctrl_held
             button = tk.Button(utility, text=label, command=lambda a=action: self.activate(str(a), lambda: self.key_action(a)),
-                               bg=PANEL, fg=MUTED, activebackground=KEY_ALT, activeforeground=INK,
+                               bg=LIME if active_modifier else PANEL,
+                               fg=BG if active_modifier else MUTED,
+                               activebackground=KEY_ALT, activeforeground=INK,
                                relief="flat", bd=0, padx=13, pady=6,
                                font=("Segoe UI", 9, "bold"), takefocus=0)
             self._register_nav_button(button)
@@ -576,6 +635,7 @@ class FireflyKeyboard:
 
     def _run_mouse_navigation_self_test(self) -> None:
         """Exercise remote pointer-right + click through the real mouse hook."""
+        self.preview_hover = True
         self.pointer_inside = True
         first = next((button for button in self.nav_buttons if button.cget("text") == "q"), None)
         if not first:
@@ -591,6 +651,14 @@ class FireflyKeyboard:
                 HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click)
             ),
         )
+
+    def _run_paste_self_test(self) -> None:
+        self.key_action("PASTE")
+
+    def _run_ctrl_self_test(self) -> None:
+        self.ctrl_held = True
+        self.key_action("a")
+        self.root.after(180, lambda: self.key_action("x"))
 
     def activate(self, signature: str, action) -> None:
         now = time.perf_counter() * 1000
@@ -610,21 +678,57 @@ class FireflyKeyboard:
             self.symbols = not self.symbols
             self.shifted = False
             self._build_keys()
+        elif action == "CTRL":
+            self.ctrl_held = not self.ctrl_held
+            self._build_keys()
         elif action == "BACK":
-            self._send_to_target(lambda: send_vk(VK_BACK), lambda hwnd: direct_vk(hwnd, VK_BACK))
+            self._send_vk_action(VK_BACK)
         elif action == "PASTE":
-            self._send_to_target(paste_clipboard, lambda hwnd: user32.PostMessageW(hwnd, WM_PASTE, 0, 0))
+            self.ctrl_held = False
+            clipboard_text = read_clipboard_text()
+            if clipboard_text is None:
+                self._send_to_target(paste_clipboard, lambda hwnd: direct_ctrl_chord(hwnd, VK_V))
+            else:
+                # Text injection is reliable in remote/RDP targets where a
+                # synthetic Ctrl+V may be swallowed before reaching the editor.
+                self._send_to_target(
+                    lambda: False,
+                    lambda hwnd, value=clipboard_text: direct_text(hwnd, value),
+                )
+            self._build_keys()
         elif isinstance(action, int):
-            self._send_to_target(lambda: send_vk(action), lambda hwnd: direct_vk(hwnd, action))
+            self._send_vk_action(action)
         elif isinstance(action, str) and action.startswith("VK:"):
             vk = int(action.split(":", 1)[1])
-            self._send_to_target(lambda: send_vk(vk), lambda hwnd: direct_vk(hwnd, vk))
+            self._send_vk_action(vk)
         else:
             text = str(action)
-            self._send_to_target(lambda: send_unicode(text), lambda hwnd: direct_text(hwnd, text))
+            reset_layout = self.shifted
+            if self.ctrl_held and len(text) == 1:
+                vk = user32.VkKeyScanW(text) & 0xFF
+                self._send_to_target(
+                    lambda value=vk: send_ctrl_chord(value),
+                    lambda hwnd, value=vk: direct_ctrl_chord(hwnd, value),
+                )
+                self.ctrl_held = False
+                reset_layout = True
+            else:
+                self._send_to_target(lambda: False, lambda hwnd: direct_text(hwnd, text))
             if self.shifted:
                 self.shifted = False
+            if reset_layout:
                 self._build_keys()
+
+    def _send_vk_action(self, vk: int) -> None:
+        if self.ctrl_held:
+            self._send_to_target(
+                lambda: send_ctrl_chord(vk),
+                lambda hwnd: direct_ctrl_chord(hwnd, vk),
+            )
+            self.ctrl_held = False
+            self._build_keys()
+        else:
+            self._send_to_target(lambda: False, lambda hwnd: direct_vk(hwnd, vk))
 
     def _focused_control(self, target: int) -> int:
         thread_id = user32.GetWindowThreadProcessId(target, None)
@@ -648,16 +752,12 @@ class FireflyKeyboard:
                 user32.SetForegroundWindow(target)
                 if focused and focused != target:
                     user32.SetFocus(focused)
-            finally:
-                if attached:
-                    user32.AttachThreadInput(current_thread, target_thread, False)
-
-            def deliver() -> None:
                 if not callback():
                     fallback(focused or target)
                 self.guard_var.set(f"Sent to {self._target_title(target)} · {self.blocked} blocked")
-
-            self.root.after(45, deliver)
+            finally:
+                if attached:
+                    user32.AttachThreadInput(current_thread, target_thread, False)
         else:
             self.guard_var.set("No target yet — click a text field in another window")
 
@@ -794,7 +894,7 @@ class FireflyKeyboard:
             self.root.after(900, lambda: self.save_screenshot_bmp(out))
         if "--self-test" in sys.argv:
             self.root.after(650, lambda: self._send_to_target(
-                lambda: send_unicode("firefly"),
+                lambda: False,
                 lambda hwnd: direct_text(hwnd, "firefly"),
             ))
             self.root.after(1800, self.close)
@@ -804,6 +904,12 @@ class FireflyKeyboard:
         if "--mouse-nav-self-test" in sys.argv:
             self.root.after(650, self._run_mouse_navigation_self_test)
             self.root.after(2400, self.close)
+        if "--paste-self-test" in sys.argv:
+            self.root.after(650, self._run_paste_self_test)
+            self.root.after(2400, self.close)
+        if "--ctrl-self-test" in sys.argv:
+            self.root.after(650, self._run_ctrl_self_test)
+            self.root.after(2600, self.close)
         self.root.mainloop()
 
 
@@ -812,5 +918,6 @@ if __name__ == "__main__":
     if "--replace-osk" in sys.argv:
         close_windows_osk()
     FireflyKeyboard().run()
+
 
 
