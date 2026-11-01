@@ -6,7 +6,7 @@ A native, remote-oriented Windows on-screen keyboard for a Fire TV/remote-deskto
 
 Double-click `Launch Firefly Keyboard.cmd`. It closes the legacy Windows On-Screen Keyboard window so that the two keyboards do not overlap, **without disabling or uninstalling Windows OSK**. You can reopen OSK normally if Firefly cannot receive input.
 
-The close (×) control requires a second press within 2.5 seconds, preventing a remote pointer mistake from immediately shutting down the keyboard. If the keyboard fails to open, run `python firefly_keyboard.pyw` from a command prompt to see a Python error (the normal launcher uses `pythonw` and hides console output).
+The close (×) control requires a second press within 2.5 seconds, preventing a remote pointer mistake from immediately shutting down the keyboard. Startup and callback errors are recorded to **`%LOCALAPPDATA%\\FireflyDeskKeyboard\\startup.log`** every launch, including the no-console `pythonw` launcher. If it seems to vanish, first check whether it only became transparent (now fixed) or was temporarily hidden by one-shot click mode. If it truly exits, inspect that log. Run `Debug Firefly Keyboard.cmd` for a visible troubleshooting console, without replacing Windows OSK.
 
 ## Remote interaction
 
@@ -16,10 +16,11 @@ The close (×) control requires a second press within 2.5 seconds, preventing a 
 - Ctrl is one-shot for shortcuts. Be deliberate with Ctrl+C/Ctrl+D in a running terminal because those have real effects. Shift+Ctrl combinations aren't currently provided.
 - `TOP/BOTTOM` moves the keyboard. `SIZE` cycles three scale presets. `123` switches symbols.
 - `PASTE` reads clipboard text directly when possible; otherwise attempts Ctrl+V. The target must accept the text. Click a destination text field before typing.
+- The keyboard stays **84% opaque** while idle rather than fading to 24%, which previously looked like it had disappeared. Remote mouse double-click events and same-point repeated downs are filtered to reduce doubled characters.
 
 ## Quick launch
 
-Use the **APPS / DESKTOP** strip: `CMD`, `POWERSHELL`, `FILES` (Explorer), and `NOTEPAD` open those applications in your Windows session. `RUN` opens Windows' built-in Win+R dialog to start *other* installed apps without bloating Firefly with another launcher. Newly opened programs can take a moment to become the tracked target.
+Use the **APPS / DESKTOP** strip: `CMD`, `POWERSHELL`, `FILES` (Explorer), `NOTEPAD`, and **`CHROME`** open those applications in your Windows session. Chrome is located through Windows App Paths registration or conventional installation folders, including per-user installations. `RUN` opens Windows' built-in Win+R dialog to start *other* installed apps without bloating Firefly with another launcher. Newly opened programs can take a moment to become the tracked target.
 
 ## Click anywhere (including behind Firefly)
 
