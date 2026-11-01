@@ -32,8 +32,8 @@ MUTED = "#91a4bd"
 CYAN = "#57d9ff"
 LIME = "#b7f34a"
 RED = "#ff6e78"
-ALPHA_IDLE = 0.84  # Was 0.24: appeared to vanish as soon as pointer left
-ALPHA_ACTIVE = 0.98
+ALPHA_IDLE = 0.24  # Restore original translucent, non-obstructing idle overlay
+ALPHA_ACTIVE = 0.88
 
 COMMON_WORDS = tuple("""
 the to and a of in is it you that for on with this I be are as have at or
@@ -413,6 +413,7 @@ class FireflyKeyboard:
         self._load_language_model()
         self._configure_window()
         self._build()
+        self._fit_window_to_content()
         self.root.after(150, self._apply_no_activate)
         # A single Tk timer samples remote input even in safe mode, but
         # navigation dispatch is opt-in. Polling does not swallow OS events.
@@ -448,6 +449,34 @@ class FireflyKeyboard:
         y = work.top if self.dock_top else work.bottom - height - frame_h
         self.root.geometry(f"{work_w - frame_w}x{height}+{work.left}+{y}")
         self.root.minsize(780, 340)
+
+    def _fit_window_to_content(self) -> None:
+        """Keep *all* keyboard rows, including utility keys below Enter, visible.
+
+        Tk's packer clips widgets added last if the client height is smaller
+        than the sum of requested row heights. Adding the app-launch strip had
+        pushed the utility row off-screen at typical AnyWare dimensions.
+        """
+        self.root.update_idletasks()
+        work = RECT()
+        user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work), 0)
+        work_w = max(1, work.right - work.left)
+        work_h = max(1, work.bottom - work.top)
+        hwnd = user32.GetAncestor(self.root.winfo_id(), GA_ROOT) or self.root.winfo_id()
+        outer, client = RECT(), RECT()
+        user32.GetWindowRect(hwnd, ctypes.byref(outer))
+        user32.GetClientRect(hwnd, ctypes.byref(client))
+        frame_h = max(0, outer.bottom - outer.top - (client.bottom - client.top))
+        frame_w = max(0, outer.right - outer.left - (client.right - client.left))
+        maximum = max(1, work_h - frame_h)
+        # Requested height is content's natural size, independent of geometry.
+        # Reserve a few pixels to avoid clipping the final PASTE/DELETE row.
+        required = self.root.winfo_reqheight() + 12
+        height = min(max(required, min(420, int(work_h * 0.58))), maximum)
+        width = max(1, work_w - frame_w)
+        y = work.top if self.dock_top else work.bottom - height - frame_h
+        self.root.geometry(f"{width}x{height}+{work.left}+{max(work.top, y)}")
+        self.root.minsize(min(780, width), min(max(300, required), maximum))
 
     def _apply_no_activate(self) -> None:
         self.root.update_idletasks()
@@ -1283,11 +1312,12 @@ class FireflyKeyboard:
     def toggle_size(self) -> None:
         self.scale = {1.0: 1.22, 1.22: 0.82}.get(self.scale, 1.0)
         self._build()
+        self._fit_window_to_content()
         self._apply_no_activate()
 
     def toggle_dock(self) -> None:
         self.dock_top = not self.dock_top
-        self._configure_window()
+        self._fit_window_to_content()
         self._apply_no_activate()
 
     def _update_target(self) -> None:
