@@ -28,6 +28,18 @@ RED = "#ff6e78"
 ALPHA_IDLE = 0.24
 ALPHA_ACTIVE = 0.88
 
+COMMON_WORDS = tuple("""
+the to and a of in is it you that for on with this I be are as have at or
+from by not was but we they your can all will my one about would there their
+what so up out if who get which go me when make like time no just him know
+take people into year good some could them see other than then now look only
+come its over think also back after use two how our work first well way even
+new want because these give day most us hello help helpful here home thanks thank
+please yes okay sorry today tomorrow tonight where why when firefly keyboard
+remote desktop click paste control copy cut select search open close send
+message write read next previous left right top bottom recommend word words
+""".split())
+
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
 gdi32 = ctypes.windll.gdi32
@@ -73,6 +85,7 @@ WM_SYSKEYUP = 0x0105
 WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
+WM_LBUTTONDBLCLK = 0x0203
 WM_CHAR = 0x0102
 WM_PASTE = 0x0302
 WM_CLOSE = 0x0010
@@ -285,6 +298,9 @@ class FireflyKeyboard:
         self.preview_idle = "--idle-preview" in sys.argv
         self.pointer_inside = False
         self.header_buttons: list[tk.Button] = []
+        self.suggestion_buttons: list[tk.Button] = []
+        self.suggestions: list[str] = []
+        self.current_word = ""
         self.nav_buttons: list[tk.Button] = []
         self.nav_selected: tk.Button | None = None
         self.hook = None
@@ -294,6 +310,8 @@ class FireflyKeyboard:
         self.mouse_hook = None
         self.mouse_hook_proc = HOOKPROC(self._mouse_navigation_hook)
         self.last_mouse_point: tuple[int, int] | None = None
+        self.mouse_motion_accum = [0, 0]
+        self.last_mouse_motion_at = 0.0
         self.close_armed_until = 0.0
         self.event_rows: list[str] = []
         self.last_native_at = 0
@@ -314,7 +332,7 @@ class FireflyKeyboard:
         work = RECT()
         user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work), 0)
         work_w, work_h = work.right - work.left, work.bottom - work.top
-        height = min(work_h, max(340, int(work_h * 0.43)))
+        height = min(work_h, max(380, int(work_h * 0.49)))
         # Keep Win32 and Tk in the same DPI coordinate space. Explicitly making
         # this process DPI-aware gives Remote Desktop's 1536x863 viewport a
         # 2048x1152 work area, which places most of the keyboard off-screen.
@@ -343,6 +361,7 @@ class FireflyKeyboard:
         for child in self.root.winfo_children():
             child.destroy()
         self.header_buttons = []
+        self.suggestion_buttons = []
         self.nav_buttons = []
         self.nav_selected = None
         title = tk.Frame(self.root, bg=BG, padx=16, pady=10)
@@ -365,6 +384,25 @@ class FireflyKeyboard:
         tk.Label(status, textvariable=self.inspect_var, fg=CYAN, bg=PANEL,
                  anchor="e", font=("Segoe UI", 9)).pack(side="right")
 
+        suggest = tk.Frame(self.root, bg=BG, padx=12, pady=5)
+        suggest.pack(fill="x")
+        tk.Label(suggest, text="WORDS", fg=CYAN, bg=BG,
+                 font=("Segoe UI", 9, "bold"), width=7).pack(side="left")
+        for index in range(3):
+            button = tk.Button(
+                suggest, text="…",
+                command=lambda i=index: self.activate(
+                    f"suggest:{i}", lambda: self._accept_suggestion(i)
+                ),
+                bg=KEY_ALT, fg=INK, activebackground=LIME, activeforeground=BG,
+                relief="flat", bd=0, pady=4, font=("Segoe UI", 11, "bold"),
+                takefocus=0,
+            )
+            self.suggestion_buttons.append(button)
+            self._register_nav_button(button)
+            button.pack(side="left", expand=True, fill="x", padx=4)
+        self._update_suggestions()
+
         self.keyboard = tk.Frame(self.root, bg=BG, padx=10, pady=9)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
@@ -381,7 +419,54 @@ class FireflyKeyboard:
     def _register_nav_button(self, button: tk.Button) -> tk.Button:
         self.nav_buttons.append(button)
         button.configure(highlightthickness=0)
+        button.bind("<Enter>", lambda _event, item=button: self._select_nav_button(item), add="+")
         return button
+
+    def _update_suggestions(self) -> None:
+        prefix = self.current_word.lower()
+        if prefix:
+            choices = [word for word in COMMON_WORDS if word.lower().startswith(prefix)]
+        else:
+            choices = ["the", "I", "you"]
+        unique = []
+        for word in choices + ["the", "I", "you", "and", "to"]:
+            if word.lower() not in {item.lower() for item in unique}:
+                shown = word.capitalize() if self.current_word[:1].isupper() else word
+                unique.append(shown)
+            if len(unique) == 3:
+                break
+        self.suggestions = unique
+        for index, button in enumerate(self.suggestion_buttons):
+            button.configure(text=unique[index] if index < len(unique) else "…")
+
+    def _track_text(self, text: str) -> None:
+        for char in text:
+            if char.isalpha() or (char == "'" and self.current_word):
+                self.current_word += char
+            else:
+                self.current_word = ""
+        self._update_suggestions()
+
+    def _accept_suggestion(self, index: int) -> None:
+        if index >= len(self.suggestions):
+            return
+        suggestion = self.suggestions[index]
+        typed = self.current_word
+
+        def replace(hwnd: int) -> None:
+            for _ in typed:
+                direct_vk(hwnd, VK_BACK)
+            self.root.after(
+                70,
+                lambda: self._send_to_target(
+                    lambda: False,
+                    lambda target: direct_text(target, suggestion + " "),
+                ),
+            )
+
+        self._send_to_target(lambda: False, replace)
+        self.current_word = ""
+        self._update_suggestions()
 
     def _layout(self):
         if self.symbols:
@@ -400,7 +485,7 @@ class FireflyKeyboard:
     def _build_keys(self) -> None:
         for child in self.keyboard.winfo_children():
             child.destroy()
-        self.nav_buttons = list(self.header_buttons)
+        self.nav_buttons = list(self.header_buttons) + list(self.suggestion_buttons)
         self.nav_selected = None
         font_size = max(13, int(19 * self.scale))
         # One text line keeps all four key rows plus navigation visible in the
@@ -465,16 +550,35 @@ class FireflyKeyboard:
         self.nav_selected = button
         button.configure(highlightthickness=3, highlightbackground=LIME, highlightcolor=LIME)
 
-    def _select_pointer_button(self) -> None:
-        x, y = self.root.winfo_pointerxy()
+    def _button_at_point(self, x: int, y: int) -> tk.Button | None:
         widget = self.root.winfo_containing(x, y)
         while widget is not None and not isinstance(widget, tk.Button):
             widget = getattr(widget, "master", None)
         if isinstance(widget, tk.Button) and widget in self.nav_buttons:
-            self._select_nav_button(widget)
+            return widget
+        return None
+
+    def _select_pointer_button(self) -> None:
+        x, y = self.root.winfo_pointerxy()
+        button = self._button_at_point(x, y)
+        if button:
+            self._select_nav_button(button)
         elif self.nav_buttons:
             index = min(len(self.header_buttons), len(self.nav_buttons) - 1)
             self._select_nav_button(self.nav_buttons[index])
+
+    def _handle_mouse_motion(self, point: tuple[int, int], direction: str | None) -> None:
+        button = self._button_at_point(*point)
+        if button:
+            self._select_nav_button(button)
+        elif direction:
+            self.activate("mouse-nav:" + direction, lambda: self._move_nav(direction))
+
+    def _invoke_pointer_button(self, point: tuple[int, int]) -> None:
+        button = self._button_at_point(*point) or self.nav_selected
+        if button and button.winfo_exists():
+            self._select_nav_button(button)
+            button.invoke()
 
     def _focus_navigation(self) -> None:
         if not self.pointer_inside:
@@ -492,11 +596,13 @@ class FireflyKeyboard:
         self.pointer_inside = inside
         if inside:
             self.last_mouse_point = self.root.winfo_pointerxy()
+            self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_ACTIVE)
             self._select_pointer_button()
             self.guard_var.set("REMOTE DIRECTIONS navigate · CLICK/OK presses")
         else:
             self.last_mouse_point = None
+            self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_IDLE)
             self._apply_no_activate()
             target = self.last_external_hwnd
@@ -581,23 +687,30 @@ class FireflyKeyboard:
             if w_param == WM_MOUSEMOVE:
                 previous = self.last_mouse_point
                 self.last_mouse_point = point
+                direction = None
                 if previous:
                     dx, dy = point[0] - previous[0], point[1] - previous[1]
-                    if max(abs(dx), abs(dy)) >= 8:
-                        if abs(dx) >= abs(dy):
-                            direction = "Right" if dx > 0 else "Left"
+                    now = time.monotonic()
+                    if now - self.last_mouse_motion_at > 0.45:
+                        self.mouse_motion_accum = [0, 0]
+                    self.last_mouse_motion_at = now
+                    self.mouse_motion_accum[0] += dx
+                    self.mouse_motion_accum[1] += dy
+                    ax, ay = self.mouse_motion_accum
+                    if max(abs(ax), abs(ay)) >= 5:
+                        if abs(ax) >= abs(ay):
+                            direction = "Right" if ax > 0 else "Left"
                         else:
-                            direction = "Down" if dy > 0 else "Up"
-                        self.root.after(
-                            0,
-                            lambda value=direction: self.activate(
-                                "mouse-nav:" + value, lambda: self._move_nav(value)
-                            ),
-                        )
-            elif w_param == WM_LBUTTONDOWN and self.nav_selected:
-                self.root.after(0, self.nav_selected.invoke)
+                            direction = "Down" if ay > 0 else "Up"
+                        self.mouse_motion_accum = [0, 0]
+                self.root.after(
+                    0,
+                    lambda value=direction, position=point: self._handle_mouse_motion(position, value),
+                )
+            elif w_param in (WM_LBUTTONDOWN, WM_LBUTTONDBLCLK):
+                self.root.after(0, lambda position=point: self._invoke_pointer_button(position))
                 return 1
-            elif w_param == WM_LBUTTONUP and self.nav_selected:
+            elif w_param == WM_LBUTTONUP:
                 return 1
         return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
 
@@ -642,15 +755,36 @@ class FireflyKeyboard:
             return
         self._select_nav_button(first)
         self.last_mouse_point = (100, 100)
-        move = MSLLHOOKSTRUCT(pt=POINT(130, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
-        self._mouse_navigation_hook(HC_ACTION, WM_MOUSEMOVE, ctypes.addressof(move))
-        click = MSLLHOOKSTRUCT(pt=POINT(130, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
+        for x in (102, 104, 106):
+            move = MSLLHOOKSTRUCT(pt=POINT(x, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
+            self._mouse_navigation_hook(HC_ACTION, WM_MOUSEMOVE, ctypes.addressof(move))
+        click = MSLLHOOKSTRUCT(pt=POINT(106, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
         self.root.after(
             100,
             lambda: self._mouse_navigation_hook(
                 HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click)
             ),
         )
+
+    def _run_hover_click_self_test(self) -> None:
+        """Exercise one remote click on the key physically under the pointer."""
+        self.preview_hover = True
+        self.pointer_inside = True
+        self.root.update_idletasks()
+        button = next((item for item in self.nav_buttons if item.cget("text") == "w"), None)
+        if not button:
+            return
+        point = POINT(
+            button.winfo_rootx() + button.winfo_width() // 2,
+            button.winfo_rooty() + button.winfo_height() // 2,
+        )
+        click = MSLLHOOKSTRUCT(pt=point, mouseData=0, flags=0, time=0, dwExtraInfo=0)
+        self._mouse_navigation_hook(HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click))
+
+    def _run_suggestion_self_test(self) -> None:
+        self.current_word = "hel"
+        self._update_suggestions()
+        self._accept_suggestion(0)
 
     def _run_paste_self_test(self) -> None:
         self.key_action("PASTE")
@@ -683,6 +817,8 @@ class FireflyKeyboard:
             self._build_keys()
         elif action == "BACK":
             self._send_vk_action(VK_BACK)
+            self.current_word = self.current_word[:-1]
+            self._update_suggestions()
         elif action == "PASTE":
             self.ctrl_held = False
             clipboard_text = read_clipboard_text()
@@ -695,12 +831,16 @@ class FireflyKeyboard:
                     lambda: False,
                     lambda hwnd, value=clipboard_text: direct_text(hwnd, value),
                 )
+                self._track_text(clipboard_text)
             self._build_keys()
         elif isinstance(action, int):
             self._send_vk_action(action)
         elif isinstance(action, str) and action.startswith("VK:"):
             vk = int(action.split(":", 1)[1])
             self._send_vk_action(vk)
+            if vk in (VK_RETURN, VK_TAB, VK_ESCAPE):
+                self.current_word = ""
+                self._update_suggestions()
         else:
             text = str(action)
             reset_layout = self.shifted
@@ -714,6 +854,7 @@ class FireflyKeyboard:
                 reset_layout = True
             else:
                 self._send_to_target(lambda: False, lambda hwnd: direct_text(hwnd, text))
+                self._track_text(text)
             if self.shifted:
                 self.shifted = False
             if reset_layout:
@@ -904,6 +1045,12 @@ class FireflyKeyboard:
         if "--mouse-nav-self-test" in sys.argv:
             self.root.after(650, self._run_mouse_navigation_self_test)
             self.root.after(2400, self.close)
+        if "--hover-click-self-test" in sys.argv:
+            self.root.after(650, self._run_hover_click_self_test)
+            self.root.after(2200, self.close)
+        if "--suggestion-self-test" in sys.argv:
+            self.root.after(650, self._run_suggestion_self_test)
+            self.root.after(2200, self.close)
         if "--paste-self-test" in sys.argv:
             self.root.after(650, self._run_paste_self_test)
             self.root.after(2400, self.close)
@@ -918,6 +1065,7 @@ if __name__ == "__main__":
     if "--replace-osk" in sys.argv:
         close_windows_osk()
     FireflyKeyboard().run()
+
 
 
 
