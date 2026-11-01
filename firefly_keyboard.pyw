@@ -863,6 +863,14 @@ class FireflyKeyboard:
             [("⇧", "SHIFT")] + [(c.upper() if self.shifted else c, c.upper() if self.shifted else c) for c in "zxcvbnm"] + [("⌫", "BACK")],
         ]
 
+    def _invoke_layout_key(self, action: str) -> None:
+        # Action is captured when the Tk button is created. Shift can change
+        # the *label* in place, so resolve capitalization at activation time.
+        actual = (action.upper() if self.shifted and len(action) == 1
+                  and action.isalpha() else action)
+        signature = "key:" + action.lower() if len(action) == 1 and action.isalpha() else action
+        self.activate(signature, lambda value=actual: self.key_action(value))
+
     def _build_keys(self) -> None:
         self.letter_buttons = {}
         self.shift_button = None
@@ -899,7 +907,7 @@ class FireflyKeyboard:
             frame.pack(fill="both", expand=True, pady=1)
             for col, (label, action) in enumerate(row):
                 frame.grid_columnconfigure(col, weight=2 if action in ("SHIFT", "BACK", "MODE") else 1, uniform="keys")
-                button = tk.Button(frame, text=label, command=lambda a=action: self.activate(a, lambda: self.key_action(a)),
+                button = tk.Button(frame, text=label, command=lambda a=action: self._invoke_layout_key(a),
                                    bg=LIME if action == "SHIFT" and self.shifted else (KEY_ALT if action in ("SHIFT", "BACK", "MODE") else KEY),
                                    fg=BG if action == "SHIFT" and self.shifted else (CYAN if action in ("SHIFT", "BACK", "MODE") else INK),
                                    activebackground=LIME, activeforeground=BG, relief="flat", bd=0,
@@ -1278,22 +1286,25 @@ class FireflyKeyboard:
         else:
             text = str(action)
             reset_layout = self.shifted
+            delivered = False
             if self.ctrl_held and len(text) == 1:
                 vk = user32.VkKeyScanW(text) & 0xFF
-                self._send_to_target(
+                delivered = self._send_to_target(
                     lambda value=vk: send_ctrl_chord(value),
                     lambda hwnd, value=vk: direct_ctrl_chord(hwnd, value),
                 )
                 self.ctrl_held = False
                 reset_layout = True
             else:
-                if self._send_to_target(
+                delivered = self._send_to_target(
                     lambda: send_unicode(text), lambda hwnd: direct_text(hwnd, text)
-                ):
+                )
+                if delivered:
                     self._track_text(text)
-            if self.shifted:
+            if self.shifted and delivered:
                 self.shifted = False
-            if reset_layout:
+                self._refresh_shift_keys()
+            elif reset_layout:
                 self._refresh_shift_keys()
 
     def _send_vk_action(self, vk: int) -> bool:
