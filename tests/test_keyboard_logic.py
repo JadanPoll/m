@@ -59,6 +59,30 @@ class FireflyLogicTests(unittest.TestCase):
         self.assertIn("BACK", ns["REPEAT_OPTION_SUFFIXES"])
         self.assertNotIn("CTRL", ns["REPEAT_OPTION_SUFFIXES"])
 
+    def test_pointer_bursts_map_only_when_axis_aligned(self):
+        direction = ns["pointer_nav_direction"]
+        self.assertEqual(direction(12, 2), "Right")
+        self.assertEqual(direction(-12, 3), "Left")
+        self.assertEqual(direction(1, -8), "Up")
+        self.assertEqual(direction(2, 9), "Down")
+        self.assertIsNone(direction(2, 0))
+        self.assertIsNone(direction(8, 7))
+
+    def test_global_ok_guard_blocks_next_same_point_activation(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.last_ok_press = (None, 0.0)
+        keyboard.suppress_ok_once = False
+        keyboard.suppress_ok_until = 0.0
+        keyboard.blocked = 0
+        keyboard.guard_var = type("Status", (), {"set": lambda self, value: None})()
+        event = type("Event", (), {"x_root": 400, "y_root": 500})()
+        keyboard._on_pointer_press(event)
+        keyboard._on_pointer_press(event)
+        fired = []
+        keyboard.activate("key:a", lambda: fired.append("a"))
+        self.assertEqual(fired, [])
+        self.assertEqual(keyboard.blocked, 1)
+
     def test_drag_sequence_has_one_press_and_final_release(self):
         flags = ns
         start, end = (123, 456), (420, 600)
@@ -123,4 +147,5 @@ class FireflyLogicTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
 
