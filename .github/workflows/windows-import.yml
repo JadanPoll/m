@@ -1,0 +1,23 @@
+name: Windows import smoke check
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify Firefly source parses and Win32 bindings load
+        shell: pwsh
+        run: |
+          python -m py_compile firefly_keyboard.pyw
+          python -c "import runpy; runpy.run_path('firefly_keyboard.pyw', run_name='firefly_import_check')"
