@@ -40,6 +40,25 @@ class FireflyLogicTests(unittest.TestCase):
         self.assertEqual(fired, ["hide", "move"])
         self.assertEqual(keyboard.blocked, 1)
 
+    def test_option_guard_tracks_each_control_across_other_actions(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.last_action = ("", 0.0)
+        keyboard.menu_last_ms = {}
+        keyboard.option_last_ms = {}
+        keyboard.blocked = 0
+        keyboard.guard_var = type("Status", (), {"set": lambda self, value: None})()
+        fired = []
+        keyboard.activate("option:CTRL", lambda: fired.append("ctrl-on"))
+        keyboard.activate("option:MODE", lambda: fired.append("symbols"))
+        keyboard.activate("option:CTRL", lambda: fired.append("ctrl-off"))
+        self.assertEqual(fired, ["ctrl-on", "symbols"])
+        self.assertEqual(keyboard.blocked, 1)
+
+    def test_repeatable_options_use_shorter_guard(self):
+        self.assertLess(ns["REPEAT_OPTION_GUARD_MS"], ns["OPTION_GUARD_MS"])
+        self.assertIn("BACK", ns["REPEAT_OPTION_SUFFIXES"])
+        self.assertNotIn("CTRL", ns["REPEAT_OPTION_SUFFIXES"])
+
     def test_drag_sequence_has_one_press_and_final_release(self):
         flags = ns
         start, end = (123, 456), (420, 600)
@@ -104,3 +123,4 @@ class FireflyLogicTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
