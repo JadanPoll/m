@@ -75,6 +75,7 @@ VK_CONTROL = 0x11
 VK_LWIN = 0x5B
 VK_R = 0x52
 VK_V = 0x56
+ERROR_ALREADY_EXISTS = 183
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
 GWL_EXSTYLE = -20
@@ -197,6 +198,12 @@ kernel32.GlobalUnlock.argtypes = (wintypes.HANDLE,)
 kernel32.GlobalUnlock.restype = wintypes.BOOL
 # On 64-bit Windows, ctypes defaults undeclared return values and parameters
 # to 32-bit int. HWND/HMODULE/HHOOK must NEVER be truncated.
+kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+kernel32.CreateMutexW.restype = wintypes.HANDLE
+kernel32.GetLastError.argtypes = ()
+kernel32.GetLastError.restype = wintypes.DWORD
+kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+kernel32.CloseHandle.restype = wintypes.BOOL
 kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
 kernel32.GetModuleHandleW.restype = wintypes.HMODULE
 user32.GetForegroundWindow.argtypes = ()
@@ -343,8 +350,19 @@ def close_windows_osk() -> None:
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
 
 
+def claim_single_instance() -> int | None:
+    """Ensure that rapid repeated remote launches cannot replace each other."""
+    handle = kernel32.CreateMutexW(None, False, "Local\\FireflyDeskKeyboard")
+    if not handle:
+        raise ctypes.WinError()
+    if kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+        kernel32.CloseHandle(handle)
+        return None
+    return handle
+
+
 def close_existing_firefly() -> None:
-    """Replace an older overlay instead of stacking multiple keyboards."""
+    """Only replace a pre-mutex legacy overlay after claiming the singleton."""
     hwnd = user32.FindWindowW(None, APP_TITLE)
     if hwnd:
         # The first close arms the accidental-close guard; the second confirms
@@ -487,30 +505,36 @@ class FireflyKeyboard:
         tk.Label(status, textvariable=self.inspect_var, fg=CYAN, bg=PANEL,
                  anchor="e", font=("Segoe UI", 9)).pack(side="right")
 
-        quick = tk.Frame(self.root, bg=BG, padx=12, pady=3)
-        quick.pack(fill="x")
-        tk.Label(quick, text="APPS / DESKTOP", fg=CYAN, bg=BG,
-                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
-        shortcuts = [
-            ("CMD", lambda: self._launch_app("cmd")),
-            ("POWERSHELL", lambda: self._launch_app("powershell")),
-            ("FILES", lambda: self._launch_app("explorer")),
-            ("NOTEPAD", lambda: self._launch_app("notepad")),
-            ("CHROME", lambda: self._launch_app("chrome")),
-            ("RUN", lambda: self._launch_app("run")),
-            ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
-            ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
+        # Separate rows keep all controls reachable on a small RDP viewport.
+        shortcut_rows = [
+            ("APPS", [
+                ("CMD", lambda: self._launch_app("cmd")),
+                ("POWERSHELL", lambda: self._launch_app("powershell")),
+                ("FILES", lambda: self._launch_app("explorer")),
+                ("NOTEPAD", lambda: self._launch_app("notepad")),
+                ("CHROME", lambda: self._launch_app("chrome")),
+                ("RUN", lambda: self._launch_app("run")),
+            ]),
+            ("DESKTOP", [
+                ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
+                ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
+            ]),
         ]
-        for label, command in shortcuts:
-            button = tk.Button(
-                quick, text=label,
-                command=lambda name=label, callback=command: self.activate("quick:" + name, callback),
-                bg=KEY_ALT, fg=INK, activebackground=LIME, activeforeground=BG,
-                relief="flat", bd=0, padx=5, pady=4, font=("Segoe UI", 9, "bold"), takefocus=0,
-            )
-            self.quick_buttons.append(button)
-            self._register_nav_button(button, "quick:" + label)
-            button.pack(side="left", expand=True, fill="x", padx=3)
+        for title, shortcuts in shortcut_rows:
+            quick = tk.Frame(self.root, bg=BG, padx=12, pady=2)
+            quick.pack(fill="x")
+            tk.Label(quick, text=title, fg=CYAN, bg=BG,
+                     font=("Segoe UI", 9, "bold"), width=9).pack(side="left", padx=(0, 8))
+            for label, command in shortcuts:
+                button = tk.Button(
+                    quick, text=label,
+                    command=lambda name=label, callback=command: self.activate("quick:" + name, callback),
+                    bg=KEY_ALT, fg=INK, activebackground=LIME, activeforeground=BG,
+                    relief="flat", bd=0, padx=5, pady=3, font=("Segoe UI", 9, "bold"), takefocus=0,
+                )
+                self.quick_buttons.append(button)
+                self._register_nav_button(button, "quick:" + label)
+                button.pack(side="left", expand=True, fill="x", padx=3)
 
         suggest = tk.Frame(self.root, bg=BG, padx=12, pady=5)
         suggest.pack(fill="x")
@@ -1513,14 +1537,22 @@ if __name__ == "__main__":
         print("Firefly starting: " + sys.executable, flush=True)
     except OSError:
         pass
+    singleton = None
     try:
-        close_existing_firefly()
-        keyboard = FireflyKeyboard()
-        # Don't shut down Windows' fallback OSK before Firefly actually works.
-        if "--replace-osk" in sys.argv:
-            keyboard.root.after(1200, close_windows_osk)
-        keyboard.run()
-        print("Firefly mainloop exited normally", flush=True)
+        singleton = claim_single_instance()
+        if singleton is None:
+            print("Firefly already running — duplicate launch ignored", flush=True)
+            prior = user32.FindWindowW(None, APP_TITLE)
+            if prior:
+                user32.ShowWindow(prior, SW_RESTORE)
+        else:
+            close_existing_firefly()
+            keyboard = FireflyKeyboard()
+            # Don't shut down Windows' fallback OSK before Firefly actually works.
+            if "--replace-osk" in sys.argv:
+                keyboard.root.after(1200, close_windows_osk)
+            keyboard.run()
+            print("Firefly mainloop exited normally", flush=True)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         if sys.stderr:
@@ -1534,6 +1566,8 @@ if __name__ == "__main__":
         except Exception:
             pass
     finally:
+        if singleton is not None:
+            kernel32.CloseHandle(singleton)
         if log_file is not None:
             log_file.close()
 
