@@ -1,5 +1,6 @@
 """Fast, non-UI Windows smoke checks for Firefly's remote-critical behavior."""
 import runpy
+import time
 import unittest
 
 ns = runpy.run_path("firefly_keyboard.pyw", run_name="firefly_test_module")
@@ -67,6 +68,65 @@ class FireflyLogicTests(unittest.TestCase):
         self.assertEqual(direction(2, 9), "Down")
         self.assertIsNone(direction(2, 0))
         self.assertIsNone(direction(8, 7))
+
+    def test_captured_remote_stream_stays_snapped_and_repeats_slowly(self):
+        """Replay the accelerated Right stream captured from the real remote."""
+        decide = ns["pointer_nav_decision"]
+        # Actual 15:17:36-37 capture: +8,+103,+4,+41,+2,+8 over 1.257s.
+        samples = [
+            (0.000, 8, 0), (0.280, 103, 0), (0.590, 4, 0),
+            (0.714, 41, 0), (0.917, 2, 0), (1.257, 8, 0),
+        ]
+        active, lock_until, last_step = None, 0.0, -99.0
+        actions = []
+        for now, dx, dy in samples:
+            action, direction, lock_until = decide(
+                dx, dy, now, active, lock_until, last_step,
+            )
+            actions.append(action)
+            if action == "navigate":
+                active, last_step = direction, now
+        self.assertEqual(actions[0], "navigate")
+        self.assertNotIn("hover", actions)
+        self.assertLess(actions.count("navigate"), len(samples))
+        self.assertGreaterEqual(actions.count("snap"), 3)
+
+    def test_direction_change_is_immediate_during_remote_stream(self):
+        decide = ns["pointer_nav_decision"]
+        action, active, lock_until = decide(12, 0, 10.0, None, 0.0, 0.0)
+        self.assertEqual((action, active), ("navigate", "Right"))
+        action, active, _ = decide(-12, 0, 10.1, active, lock_until, 10.0)
+        self.assertEqual((action, active), ("navigate", "Left"))
+
+    def test_hover_enter_cannot_steal_active_remote_snap(self):
+        keyboard = Firefly.__new__(Firefly)
+        selected, drifted = object(), object()
+        keyboard.nav_selected = selected
+        keyboard.pointer_nav_lock_until = time.monotonic() + 1.0
+        keyboard.remote_nav_until = keyboard.pointer_nav_lock_until
+        keyboard.pointer_nav_direction_active = "Right"
+        changed = []
+        keyboard._select_nav_button = changed.append
+        keyboard._on_button_enter(drifted)
+        self.assertEqual(changed, [])
+        self.assertIs(keyboard.nav_selected, selected)
+
+    def test_selected_key_uses_full_lime_fill(self):
+        class Button:
+            def __init__(self):
+                self.options = {}
+                self._firefly_base_style = {}
+            def winfo_exists(self):
+                return True
+            def configure(self, **options):
+                self.options.update(options)
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.nav_selected = None
+        button = Button()
+        keyboard._select_nav_button(button)
+        self.assertEqual(button.options["bg"], ns["LIME"])
+        self.assertEqual(button.options["fg"], ns["BG"])
+        self.assertEqual(button.options["relief"], "solid")
 
     def test_global_ok_guard_blocks_next_same_point_activation(self):
         keyboard = Firefly.__new__(Firefly)
@@ -144,8 +204,36 @@ class FireflyLogicTests(unittest.TestCase):
         self.assertTrue(any(w.startswith("comp") and w != "comp"
                             for w in keyboard.suggestions))
 
+    def test_single_noisy_fragment_is_not_promoted_to_suggestion(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.corpus_counts = {"cat": 1000, "car": 500}
+        keyboard.completion_index = {"ca": ["cat", "car"]}
+        keyboard.words_by_first = {"c": ["cat", "car"]}
+        keyboard.learned_words = {"caxbroken": 1}
+        keyboard.next_words = {"hello": {"caxbroken": 1}}
+        keyboard.current_word = "ca"
+        keyboard.previous_word = "hello"
+        keyboard.suggestion_buttons = []
+        keyboard._update_suggestions()
+        self.assertEqual(keyboard.suggestions[:2], ["cat", "car"])
+        self.assertNotIn("caxbroken", keyboard.suggestions)
+
+    def test_repeated_custom_word_becomes_available(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.corpus_counts = {}
+        keyboard.completion_index = {}
+        keyboard.words_by_first = {}
+        keyboard.learned_words = {"codex": 2}
+        keyboard.next_words = {}
+        keyboard.current_word = "cod"
+        keyboard.previous_word = ""
+        keyboard.suggestion_buttons = []
+        keyboard._update_suggestions()
+        self.assertIn("codex", keyboard.suggestions)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 
