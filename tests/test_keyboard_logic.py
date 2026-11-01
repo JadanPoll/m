@@ -26,6 +26,49 @@ class FireflyLogicTests(unittest.TestCase):
             y = clamp(y - ns["MOVE_STEP_PX"], 0, 800, 350)
         self.assertEqual(y, 0)
 
+
+    def test_menu_guard_tracks_each_control_across_other_actions(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.last_action = ("", 0.0)
+        keyboard.menu_last_ms = {}
+        keyboard.blocked = 0
+        keyboard.guard_var = type("Status", (), {"set": lambda self, value: None})()
+        fired = []
+        keyboard.activate("tool:visibility", lambda: fired.append("hide"))
+        keyboard.activate("tool:MOVE ↑", lambda: fired.append("move"))
+        keyboard.activate("tool:visibility", lambda: fired.append("show"))
+        self.assertEqual(fired, ["hide", "move"])
+        self.assertEqual(keyboard.blocked, 1)
+
+    def test_drag_sequence_has_one_press_and_final_release(self):
+        flags = ns
+        start, end = (123, 456), (420, 600)
+        events = ns["plan_drag_events"](start, end, (0, 0, 1920, 1080))
+        self.assertEqual(len(events), 15)
+        self.assertEqual(events[1][2], flags["MOUSEEVENTF_LEFTDOWN"])
+        self.assertEqual(events[-1][2], flags["MOUSEEVENTF_LEFTUP"])
+        self.assertEqual(sum(event[2] == flags["MOUSEEVENTF_LEFTDOWN"] for event in events), 1)
+        self.assertEqual(sum(event[2] == flags["MOUSEEVENTF_LEFTUP"] for event in events), 1)
+        self.assertEqual(events[0][2] & flags["MOUSEEVENTF_ABSOLUTE"], flags["MOUSEEVENTF_ABSOLUTE"])
+        self.assertEqual(events[-2][2] & flags["MOUSEEVENTF_ABSOLUTE"], flags["MOUSEEVENTF_ABSOLUTE"])
+
+    def test_drag_virtual_desktop_with_negative_origin(self):
+        events = ns["plan_drag_events"]((-900, 120), (-100, 430), (-1920, 0, 3840, 1080))
+        self.assertTrue(all(0 <= x <= 65535 and 0 <= y <= 65535 for x, y, _ in events))
+        self.assertGreater(events[-2][0], events[0][0])
+
+    def test_invalid_drag_screen_is_rejected(self):
+        with self.assertRaises(ValueError):
+            ns["plan_drag_events"]((1, 1), (3, 3), (0, 0, 0, 0))
+
+    def test_cancel_invalidates_pending_capture(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.mouse_target_seq = 4
+        keyboard.mouse_target_kind = "right"
+        keyboard._cancel_mouse_targeting()
+        self.assertIsNone(keyboard.mouse_target_kind)
+        self.assertEqual(keyboard.mouse_target_seq, 5)
+
     def test_shift_key_action_follows_current_mode(self):
         keyboard = Firefly.__new__(Firefly)
         received = []
