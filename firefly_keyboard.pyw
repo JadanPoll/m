@@ -20,6 +20,13 @@ import time
 import tkinter as tk
 import zlib
 
+# Prediction is optional, as is its data: an older single-file Firefly
+# installation must remain a working keyboard, even without this module.
+try:
+    from firefly_prediction import StaticNextWords
+except ImportError:
+    StaticNextWords = None
+
 
 APP_TITLE = "Firefly Desk Keyboard"
 GUARD_MS = 300
@@ -1098,6 +1105,11 @@ class FireflyKeyboard:
             except (OSError, UnicodeError):
                 pass
         self._load_offline_dictionary()
+        self.static_next_words = (
+            StaticNextWords.load(os.path.join(os.path.dirname(__file__),
+                                               "data", "en_context_bigrams.tsv"))
+            if StaticNextWords is not None else None
+        )
 
     def _load_offline_dictionary(self) -> None:
         """Build a small prefix tree from a frequency-sorted local word list."""
@@ -1154,6 +1166,15 @@ class FireflyKeyboard:
         """
         prefix = self.current_word.casefold()
         context = self.next_words.get(self.previous_word, {})
+        static_model = getattr(self, "static_next_words", None)
+        # A pruned, corpus-derived P(next|prev) ordering is cheap and useful
+        # immediately, unlike personal bigrams which require prior typing.
+        # Truncated counts are ranking evidence, NOT calibrated probabilities.
+        static_candidates = (
+            static_model.candidates(self.previous_word, prefix)
+            if static_model is not None and self.previous_word else ()
+        )
+        static_words = {word for word, _count in static_candidates}
         common_rank = {word.casefold(): idx for idx, word in enumerate(COMMON_WORDS)}
 
         def trusted_personal(word: str) -> bool:
@@ -1168,6 +1189,8 @@ class FireflyKeyboard:
                 math.log1p(self.corpus_counts.get(word, 0))
                 + 2.0 * math.log1p(self.learned_words.get(word, 0))
                 + 2.5 * math.log1p(context.get(word, 0))
+                + (9.0 * static_model.strength(self.previous_word, word)
+                   if static_model is not None and word in static_words else 0.0)
             )
             return (-score, common_rank.get(word, 99999), len(word), word)
 
@@ -1178,7 +1201,7 @@ class FireflyKeyboard:
             contextual = [w for w in context
                           if trusted_personal(w) and w.startswith(prefix) and w != prefix]
             builtin = [w for w in common_rank if w.startswith(prefix) and w != prefix]
-            candidates = set(static) | set(personal) | set(contextual) | set(builtin)
+            candidates = set(static) | set(personal) | set(contextual) | set(builtin) | static_words
             candidates.discard(prefix)
             choices = sorted(candidates, key=rank)[:3]
             if len(choices) < 3 and len(prefix) >= 3:
@@ -1197,7 +1220,10 @@ class FireflyKeyboard:
                 ))
                 choices.extend(close[:3 - len(choices)])
         else:
-            choices = sorted((word for word in context if trusted_personal(word)), key=rank)[:3]
+            choices = sorted(
+                {word for word in context if trusted_personal(word)} | static_words,
+                key=rank,
+            )[:3]
             if len(choices) < 3:
                 defaults = ("the", "I", "you")
                 choices.extend(w for w in defaults if w.casefold() not in
@@ -1226,6 +1252,10 @@ class FireflyKeyboard:
                 if self.current_word:
                     self._learn_word(self.current_word)
                 self.current_word = ""
+                # A sentence boundary breaks next-word context, unlike a
+                # space or comma. Do not suggest continuations across it.
+                if char in ".!?\n\r":
+                    self.previous_word = ""
         self._update_suggestions()
 
     def _accept_suggestion(self, index: int) -> None:
@@ -1911,7 +1941,12 @@ class FireflyKeyboard:
             self._build_keys()
         elif action == "BACK":
             if self._send_vk_action(VK_BACK):
-                self.current_word = self.current_word[:-1]
+                if self.current_word:
+                    self.current_word = self.current_word[:-1]
+                else:
+                    # Could have deleted a separator or earlier text.
+                    # Rather than inventing a prefix, discard stale context.
+                    self.previous_word = ""
                 self._update_suggestions()
         elif action == "PASTE":
             self.ctrl_held = False
@@ -1928,7 +1963,13 @@ class FireflyKeyboard:
                     self._track_text(clipboard_text)
             self._build_keys()
         elif isinstance(action, int):
-            self._send_vk_action(action)
+            if self._send_vk_action(action) and action in (
+                VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END,
+                VK_PRIOR, VK_NEXT, VK_DELETE,
+            ):
+                self.current_word = ""
+                self.previous_word = ""
+                self._update_suggestions()
         elif isinstance(action, str) and action.startswith("VK:"):
             vk = int(action.split(":", 1)[1])
             delivered = self._send_vk_action(vk)
@@ -1936,6 +1977,13 @@ class FireflyKeyboard:
                 if self.current_word:
                     self._learn_word(self.current_word)
                 self.current_word = ""
+                # A new line, different focus, or cancelled field invalidates
+                # any assumption about the next word at the destination.
+                self.previous_word = ""
+                self._update_suggestions()
+            elif delivered and vk in (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_HOME, VK_END):
+                self.current_word = ""
+                self.previous_word = ""
                 self._update_suggestions()
         else:
             text = str(action)
