@@ -42,6 +42,12 @@ Tool buttons now have **per-control debouncing** rather than only checking the l
 
 Option controls also keep independent debounce history: toggles/actions such as `CTRL`, `SHIFT`, `123/ABC`, `PASTE`, `ENTER`, and word suggestions use **550 ms**. Repeatable editing/navigation options (`BACKSPACE`, arrows, Home/End, Page Up/Down and Delete) use **140 ms**, blocking a duplicated remote click while preserving deliberate rapid movement.
 
+The remote's measured OK/Select signal is also guarded once at the Firefly-window level. A second left-button press within **120 ms** and 18 pixels of the first is discarded before any key command runs. This protects every Firefly control without installing a system-wide mouse hook or altering clicks in other Windows applications.
+
+## D-pad snap navigation
+
+The remote desktop converts D-pad taps into accelerated pointer motion instead of `VK_LEFT/RIGHT/UP/DOWN`. While the pointer is over Firefly, strongly horizontal or vertical motion is therefore treated as one neighboring-key step and the pointer is snapped to that key's center. A **160 ms** burst guard prevents one accelerated tap from skipping several keys; the following physical OK click lands on the selected key. Diagonal mouse motion is left alone, and capture/inspector mode remains observation-only.
+
 ## Map a TV remote
 
 Run `python firefly_keyboard.pyw --capture-remote`. The red **REMOTE CAPTURE** row reports key DOWN/UP transitions as virtual-key numbers and names, plus pointer deltas when a remote button is translated into mouse movement. Move the pointer above/outside Firefly, then press each remote button once; clicking a Firefly key intentionally creates output that is annotated as likely application output rather than raw remote input. The observation-only session is appended locally to `%LOCALAPPDATA%\FireflyDeskKeyboard\remote-input-capture.log`; it installs no hooks, swallows no input, and sends nothing over the network. Very short client-side events can still be discarded before Windows exposes them.
@@ -71,6 +77,7 @@ Open the **MOUSE** menu in Firefly's title row. These functions are available in
 **Drag between two desktop positions:** Press `DRAG FROM • 4.5s`, move the pointer to the drag start, and allow the countdown to capture it. Next press `DRAG TO • 4.5s`, move the pointer to the destination, and allow that countdown to capture the endpoint. Firefly inserts mouse-down, several moves and mouse-up in **one bounded SendInput batch**. It never intentionally keeps a button held between actions or while you move the TV remote. `CANCEL / CLEAR` discards a pending capture and its start position.
 
 Because the drag is a short synthesized sequence and not a physically held mouse button, some applications (including Citrix-hosted ones) may not recognize every drag. Windows may also deny input to elevated or secure surfaces, and a successful SendInput call does not prove the application acted. **Try a harmless file selection or text selection before relying on it for any consequential operation.** The regular OSK and Citrix input path remain available if Firefly exits.
+
 
 
 
