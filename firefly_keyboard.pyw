@@ -401,6 +401,7 @@ class FireflyKeyboard:
         self.last_nav_action = ("", 0.0)
         self.remote_nav_until = 0.0
         self.pointer_mode: str | None = None
+        self.pointer_arm_after = 0.0
         self.pointer_suppress_up = False
         self.pointer_suppress_until = 0.0
         self.pointer_suppress_key: int | None = None
@@ -590,10 +591,13 @@ class FireflyKeyboard:
     def _arm_desktop_click(self, side: str) -> None:
         """Hide the overlay for one click anywhere, including beneath Firefly."""
         self.pointer_mode = side
+        # The action which selected this mode may still be sending a second
+        # mouse down / a synthetic double-click. Never click the desktop with it.
+        self.pointer_arm_after = time.monotonic() + 0.50
         self.pointer_suppress_key = None
         self.root.withdraw()
         self.guard_var.set(side.upper() + " click armed — click/OK anywhere; ESC cancels")
-        self.root.after(20000, self._cancel_pointer_click_if_pending)
+        self.root.after(10000, self._cancel_pointer_click_if_pending)
 
     def _cancel_pointer_click_if_pending(self) -> None:
         if self.pointer_mode is not None:
@@ -1021,6 +1025,8 @@ class FireflyKeyboard:
                 return 1
             point = (int(data.pt.x), int(data.pt.y))
             if self.pointer_mode is not None and w_param in (WM_LBUTTONDOWN, WM_LBUTTONDBLCLK):
+                if time.monotonic() < self.pointer_arm_after:
+                    return 1
                 side = self.pointer_mode
                 self.pointer_mode = None
                 self.pointer_suppress_up = True
@@ -1085,6 +1091,8 @@ class FireflyKeyboard:
                 if self.pointer_mode is not None and data.vkCode in (VK_RETURN, VK_SPACE, VK_ESCAPE):
                     if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
                         self.pointer_suppress_key = data.vkCode
+                        if data.vkCode != VK_ESCAPE and time.monotonic() < self.pointer_arm_after:
+                            return 1
                         if data.vkCode == VK_ESCAPE:
                             self.pointer_mode = None
                             self.root.after(0, lambda: self._restore_after_click("Desktop click cancelled"))
@@ -1427,6 +1435,7 @@ class FireflyKeyboard:
         user32.ReleaseDC(hwnd, src_dc)
 
     def close(self) -> None:
+        print("Firefly close() requested", flush=True)
         self._save_language_model()
         if self.hook:
             user32.UnhookWindowsHookEx(self.hook)
@@ -1511,6 +1520,7 @@ if __name__ == "__main__":
         if "--replace-osk" in sys.argv:
             keyboard.root.after(1200, close_windows_osk)
         keyboard.run()
+        print("Firefly mainloop exited normally", flush=True)
     except BaseException:
         traceback.print_exc(file=sys.stderr)
         if sys.stderr:
