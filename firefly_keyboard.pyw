@@ -32,8 +32,9 @@ MUTED = "#91a4bd"
 CYAN = "#57d9ff"
 LIME = "#b7f34a"
 RED = "#ff6e78"
-ALPHA_IDLE = 0.24  # Restore original translucent, non-obstructing idle overlay
+ALPHA_IDLE = 0.24  # Pointer leaves -> translucent, but not click-through.
 ALPHA_ACTIVE = 0.88
+MAX_DOCK_FRACTION = 0.34  # Never obscure half the AnyWare desktop.
 
 COMMON_WORDS = tuple("""
 the to and a of in is it you that for on with this I be are as have at or
@@ -392,6 +393,8 @@ class FireflyKeyboard:
         self.screen_h = self.root.winfo_screenheight()
         self.scale = 0.82
         self.dock_top = False
+        self.collapsed = False
+        self.show_apps = False
         self.shifted = False
         self.ctrl_held = False
         self.symbols = False
@@ -457,32 +460,14 @@ class FireflyKeyboard:
         self.guard_var.set("Firefly error — see startup.log in LOCALAPPDATA / FireflyDeskKeyboard")
 
     def _configure_window(self) -> None:
-        work = RECT()
-        user32.SystemParametersInfoW(SPI_GETWORKAREA, 0, ctypes.byref(work), 0)
-        work_w, work_h = work.right - work.left, work.bottom - work.top
-        height = min(work_h, max(380, int(work_h * 0.49)))
-        # Keep Win32 and Tk in the same DPI coordinate space. Explicitly making
-        # this process DPI-aware gives Remote Desktop's 1536x863 viewport a
-        # 2048x1152 work area, which places most of the keyboard off-screen.
-        # Account for the native title bar as well as the requested client area.
-        self.root.update_idletasks()
-        hwnd = user32.GetAncestor(self.root.winfo_id(), GA_ROOT) or self.root.winfo_id()
-        outer = RECT()
-        client = RECT()
-        user32.GetWindowRect(hwnd, ctypes.byref(outer))
-        user32.GetClientRect(hwnd, ctypes.byref(client))
-        frame_w = max(0, (outer.right - outer.left) - (client.right - client.left))
-        frame_h = max(0, (outer.bottom - outer.top) - (client.bottom - client.top))
-        y = work.top if self.dock_top else work.bottom - height - frame_h
-        self.root.geometry(f"{work_w - frame_w}x{height}+{work.left}+{y}")
-        self.root.minsize(780, 340)
+        """Initial bounded work area; never exceed the viewport's dock budget."""
+        self._fit_window_to_content()
 
     def _fit_window_to_content(self) -> None:
-        """Keep *all* keyboard rows, including utility keys below Enter, visible.
+        """Fit within 34% of the AnyWare work area; never oversize to fit text.
 
-        Tk's packer clips widgets added last if the client height is smaller
-        than the sum of requested row heights. Adding the app-launch strip had
-        pushed the utility row off-screen at typical AnyWare dimensions.
+        If the user needs something behind the dock, COLLAPSE leaves a thin
+        reopen strip instead of withdrawing the window or intercepting clicks.
         """
         self.root.update_idletasks()
         work = RECT()
@@ -495,15 +480,13 @@ class FireflyKeyboard:
         user32.GetClientRect(hwnd, ctypes.byref(client))
         frame_h = max(0, outer.bottom - outer.top - (client.bottom - client.top))
         frame_w = max(0, outer.right - outer.left - (client.right - client.left))
-        maximum = max(1, work_h - frame_h)
-        # Requested height is content's natural size, independent of geometry.
-        # Reserve a few pixels to avoid clipping the final PASTE/DELETE row.
-        required = self.root.winfo_reqheight() + 12
-        height = min(max(required, min(420, int(work_h * 0.58))), maximum)
+        maximum = max(1, min(work_h - frame_h, int(work_h * MAX_DOCK_FRACTION) - frame_h))
+        required = self.root.winfo_reqheight() + 2
+        height = min(maximum, required)
         width = max(1, work_w - frame_w)
         y = work.top if self.dock_top else work.bottom - height - frame_h
+        self.root.minsize(min(620, width), min(44, maximum))
         self.root.geometry(f"{width}x{height}+{work.left}+{max(work.top, y)}")
-        self.root.minsize(min(780, width), min(max(300, required), maximum))
 
     def _apply_no_activate(self) -> None:
         self.root.update_idletasks()
@@ -514,6 +497,7 @@ class FireflyKeyboard:
         user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
 
     def _build(self) -> None:
+        """Keep the common keyboard view compact; reveal apps only on demand."""
         for child in self.root.winfo_children():
             child.destroy()
         self.header_buttons = []
@@ -521,86 +505,79 @@ class FireflyKeyboard:
         self.suggestion_buttons = []
         self.nav_buttons = []
         self.nav_selected = None
-        title = tk.Frame(self.root, bg=BG, padx=16, pady=10)
+        title = tk.Frame(self.root, bg=BG, padx=6, pady=1)
         title.pack(fill="x")
-        tk.Label(title, text="●", fg=LIME, bg=BG, font=("Segoe UI", 15, "bold")).pack(side="left")
-        tk.Label(title, text="  FIREFLY DESK KEYBOARD", fg=INK, bg=BG,
-                 font=("Segoe UI", 14, "bold")).pack(side="left")
-        if self.safe_mode:
-            tk.Label(title, text="SAFE · POINTER", fg=LIME, bg=BG,
-                     font=("Segoe UI", 9, "bold")).pack(side="left", padx=(10, 0))
-        tk.Label(title, textvariable=self.target_var, fg=MUTED, bg=BG,
-                 font=("Segoe UI", 10)).pack(side="left", padx=22)
-        self._tool_button(title, "×", self.request_close, RED, 4).pack(side="right", padx=3)
-        self._tool_button(title, "TOP/BOTTOM", self.toggle_dock, CYAN, 12).pack(side="right", padx=3)
-        self._tool_button(title, "SIZE", self.toggle_size, CYAN, 7).pack(side="right", padx=3)
-        self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 10)
+        tk.Label(title, text="FIREFLY", fg=LIME, bg=BG,
+                 font=("Segoe UI", 10, "bold")).pack(side="left", padx=3)
+        self._tool_button(title, "SHOW" if self.collapsed else "HIDE",
+                          self.toggle_collapse, LIME, 6).pack(side="left", padx=3)
+        self._tool_button(title, "TOP/BOTTOM", self.toggle_dock, CYAN, 12).pack(side="left", padx=3)
+        if self.collapsed:
+            # No modal hide: only these small controls remain and cannot
+            # obstruct an otherwise unclickable control behind the keyboard.
+            self._tool_button(title, "OSK", lambda: self._launch_app("osk"),
+                              CYAN, 5).pack(side="left", padx=3)
+            return
+
+        self._tool_button(title, "APPS", self.toggle_apps, CYAN, 6).pack(side="left", padx=3)
+        self._tool_button(title, "SIZE", self.toggle_size, CYAN, 6).pack(side="left", padx=3)
+        self._tool_button(title, "×", self.request_close, RED, 3).pack(side="right", padx=3)
+        self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 8)
         self.inspect_button.pack(side="right", padx=3)
+        tk.Label(title, textvariable=self.target_var, fg=MUTED, bg=BG,
+                 font=("Segoe UI", 8)).pack(side="right", padx=5)
 
-        status = tk.Frame(self.root, bg=PANEL, padx=16, pady=7)
-        status.pack(fill="x", padx=12)
-        tk.Label(status, textvariable=self.guard_var, fg=LIME, bg=PANEL,
-                 font=("Segoe UI", 10, "bold")).pack(side="left")
-        tk.Label(status, textvariable=self.inspect_var, fg=CYAN, bg=PANEL,
-                 anchor="e", font=("Segoe UI", 9)).pack(side="right")
-
-        # Separate rows keep all controls reachable on a small RDP viewport.
-        shortcut_rows = [
-            ("APPS", [
-                ("CMD", lambda: self._launch_app("cmd")),
-                ("POWERSHELL", lambda: self._launch_app("powershell")),
-                ("FILES", lambda: self._launch_app("explorer")),
-                ("NOTEPAD", lambda: self._launch_app("notepad")),
-                ("CHROME", lambda: self._launch_app("chrome")),
-                ("RUN", lambda: self._launch_app("run")),
-                ("OSK", lambda: self._launch_app("osk")),
-            ]),
-        ]
-        if not self.safe_mode:
-            shortcut_rows.append(("DESKTOP", [
-                ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
-                ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
-            ]))
-        for title, shortcuts in shortcut_rows:
-            quick = tk.Frame(self.root, bg=BG, padx=12, pady=2)
+        if self.show_apps:
+            quick = tk.Frame(self.root, bg=BG, padx=4, pady=1)
             quick.pack(fill="x")
-            tk.Label(quick, text=title, fg=CYAN, bg=BG,
-                     font=("Segoe UI", 9, "bold"), width=9).pack(side="left", padx=(0, 8))
-            for label, command in shortcuts:
-                button = tk.Button(
-                    quick, text=label,
-                    command=lambda name=label, callback=command: self.activate("quick:" + name, callback),
-                    bg=KEY_ALT, fg=INK, activebackground=LIME, activeforeground=BG,
-                    relief="flat", bd=0, padx=5, pady=3, font=("Segoe UI", 9, "bold"), takefocus=0,
-                )
+            apps = [
+                ("CMD", "cmd"), ("PS", "powershell"), ("FILES", "explorer"),
+                ("NOTEPAD", "notepad"), ("CHROME", "chrome"),
+                ("RUN", "run"), ("OSK", "osk"),
+            ]
+            for label, app in apps:
+                button = tk.Button(quick, text=label,
+                                   command=lambda v=app: self.activate("app:" + v, lambda: self._launch_app(v)),
+                                   bg=KEY_ALT, fg=INK, relief="flat", bd=0,
+                                   padx=2, pady=1, font=("Segoe UI", 8, "bold"), takefocus=0)
                 self.quick_buttons.append(button)
-                self._register_nav_button(button, "quick:" + label)
-                button.pack(side="left", expand=True, fill="x", padx=3)
+                self._register_nav_button(button, "app:" + app)
+                button.pack(side="left", expand=True, fill="x", padx=1)
 
-        suggest = tk.Frame(self.root, bg=BG, padx=12, pady=5)
+        # Keep predictions visible even when the app launcher is closed.
+        suggest = tk.Frame(self.root, bg=BG, padx=5, pady=1)
         suggest.pack(fill="x")
         tk.Label(suggest, text="WORDS", fg=CYAN, bg=BG,
-                 font=("Segoe UI", 9, "bold"), width=7).pack(side="left")
+                 font=("Segoe UI", 8, "bold")).pack(side="left", padx=3)
         for index in range(3):
             button = tk.Button(
                 suggest, text="…",
                 command=lambda i=index: self.activate(
-                    f"suggest:{i}", lambda: self._accept_suggestion(i)
-                ),
-                bg=KEY_ALT, fg=INK, activebackground=LIME, activeforeground=BG,
-                relief="flat", bd=0, pady=4, font=("Segoe UI", 11, "bold"),
-                takefocus=0,
-            )
+                    f"suggest:{i}", lambda: self._accept_suggestion(i)),
+                bg=KEY_ALT, fg=INK, relief="flat", bd=0,
+                pady=1, font=("Segoe UI", 10, "bold"), takefocus=0)
             self.suggestion_buttons.append(button)
             self._register_nav_button(button, f"suggest:{index}")
-            button.pack(side="left", expand=True, fill="x", padx=4)
+            button.pack(side="left", expand=True, fill="x", padx=2)
         self._update_suggestions()
 
-        if self.safe_mode:
-            self.inspect_var.set("SAFE: no hooks · INSPECT observes VKs · Windows OSK remains available")
-        self.keyboard = tk.Frame(self.root, bg=BG, padx=10, pady=9)
+        # Status information is available via Inspect; don't spend a full
+        # text row on status while the user needs screen space for target apps.
+        self.keyboard = tk.Frame(self.root, bg=BG, padx=4, pady=1)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
+
+    def toggle_collapse(self) -> None:
+        self.collapsed = not self.collapsed
+        self._build()
+        self._fit_window_to_content()
+        self._apply_no_activate()
+
+    def toggle_apps(self) -> None:
+        self.show_apps = not self.show_apps
+        self._build()
+        self._fit_window_to_content()
+        self._apply_no_activate()
 
     @staticmethod
     def _chrome_executable() -> str | None:
