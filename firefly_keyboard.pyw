@@ -9,6 +9,7 @@ from ctypes import wintypes
 import faulthandler
 import difflib
 import json
+import math
 import os
 import subprocess
 import traceback
@@ -28,7 +29,8 @@ OPTION_GUARD_MS = 550
 REPEAT_OPTION_GUARD_MS = 140
 NAV_GUARD_MS = 75
 POINTER_NAV_GUARD_MS = 160
-POINTER_NAV_LOCK_MS = 240
+POINTER_NAV_LOCK_MS = 650
+POINTER_NAV_REPEAT_MS = 520
 POINTER_NAV_THRESHOLD_PX = 4
 GLOBAL_OK_GUARD_MS = 120
 BG = "#07111f"
@@ -63,6 +65,28 @@ def pointer_nav_direction(dx: int, dy: int) -> str | None:
     if ay >= ax * 3:
         return "Down" if dy > 0 else "Up"
     return None
+
+
+def pointer_nav_decision(dx: int, dy: int, now: float,
+                         active_direction: str | None,
+                         lock_until: float, last_step_at: float) -> tuple[str, str | None, float]:
+    """Classify one real remote motion sample without losing the snap anchor.
+
+    Captured Firefly traces show that a single held direction is an accelerated
+    same-axis stream lasting far longer than 240 ms.  Opposite/perpendicular
+    directions are new intent immediately; the same direction repeats at a
+    controlled rate so holding still traverses the keyboard.
+    """
+    direction = pointer_nav_direction(dx, dy)
+    if direction is None:
+        if now < lock_until:
+            return "snap", active_direction, now + POINTER_NAV_LOCK_MS / 1000
+        return "hover", active_direction, lock_until
+    next_lock = now + POINTER_NAV_LOCK_MS / 1000
+    repeat_ready = (now - last_step_at) * 1000 >= POINTER_NAV_REPEAT_MS
+    if now < lock_until and direction == active_direction and not repeat_ready:
+        return "snap", active_direction, next_lock
+    return "navigate", direction, next_lock
 
 
 COMMON_WORDS = tuple("""
@@ -541,6 +565,7 @@ class FireflyKeyboard:
         local_data = os.environ.get("LOCALAPPDATA", os.path.dirname(__file__))
         self.learning_path = os.path.join(local_data, "FireflyDeskKeyboard", "language.json")
         self.capture_path = os.path.join(local_data, "FireflyDeskKeyboard", "remote-input-capture.log")
+        self.nav_trace_path = os.path.join(local_data, "FireflyDeskKeyboard", "navigation-trace.log")
         self.capture_mouse_point: tuple[int, int] | None = None
         self.capture_pointer_accum = [0, 0]
         self.capture_pointer_last_log = 0.0
@@ -557,6 +582,7 @@ class FireflyKeyboard:
         self.remote_nav_until = 0.0
         self.last_pointer_nav_at = 0.0
         self.pointer_nav_lock_until = 0.0
+        self.pointer_nav_direction_active: str | None = None
         self.pointer_warp_until = 0.0
         self.pointer_warp_point: tuple[int, int] | None = None
         self.last_ok_press: tuple[tuple[int, int] | None, float] = (None, 0.0)
@@ -984,9 +1010,15 @@ class FireflyKeyboard:
     def _register_nav_button(self, button: tk.Button, identity: str | None = None) -> tk.Button:
         # Stable semantic identity survives recreating keys on Shift/Ctrl changes.
         button._firefly_identity = identity or ("label:" + str(button.cget("text")))
+        button._firefly_base_style = {
+            "bg": button.cget("bg"), "fg": button.cget("fg"),
+            "activebackground": button.cget("activebackground"),
+            "activeforeground": button.cget("activeforeground"),
+            "relief": button.cget("relief"), "bd": button.cget("bd"),
+        }
         self.nav_buttons.append(button)
         button.configure(highlightthickness=0)
-        button.bind("<Enter>", lambda _event, item=button: self._select_nav_button(item), add="+")
+        button.bind("<Enter>", lambda _event, item=button: self._on_button_enter(item), add="+")
         return button
 
     def _load_language_model(self) -> None:
@@ -1068,20 +1100,37 @@ class FireflyKeyboard:
         self.previous_word = learned
 
     def _update_suggestions(self) -> None:
-        """Frequency-ranked corpus prefix tree plus personal bigram adaptation."""
+        """Corpus ranking plus cautious, local personal/bigram adaptation.
+
+        Remote double-input can create fragments and misspellings.  Observe
+        them, but require a repeated unknown word before it can become a
+        candidate, and never let one accidental bigram outrank the corpus.
+        """
         prefix = self.current_word.casefold()
         context = self.next_words.get(self.previous_word, {})
         common_rank = {word.casefold(): idx for idx, word in enumerate(COMMON_WORDS)}
 
+        def trusted_personal(word: str) -> bool:
+            return word in self.corpus_counts or self.learned_words.get(word, 0) >= 2
+
         def rank(word: str) -> tuple:
-            return (-context.get(word, 0), -self.learned_words.get(word, 0),
-                    -self.corpus_counts.get(word, 0),
-                    common_rank.get(word, 99999), len(word), word)
+            # This is the useful part of GPT-style prediction for a tiny OSK:
+            # combine broad corpus frequency with contextual and personal
+            # evidence.  Log scaling prevents one noisy observation from
+            # overwhelming millions of corpus occurrences.
+            score = (
+                math.log1p(self.corpus_counts.get(word, 0))
+                + 2.0 * math.log1p(self.learned_words.get(word, 0))
+                + 2.5 * math.log1p(context.get(word, 0))
+            )
+            return (-score, common_rank.get(word, 99999), len(word), word)
 
         if prefix:
             static = self.completion_index.get(prefix, ())
-            personal = [w for w in self.learned_words if w.startswith(prefix) and w != prefix]
-            contextual = [w for w in context if w.startswith(prefix) and w != prefix]
+            personal = [w for w in self.learned_words
+                        if trusted_personal(w) and w.startswith(prefix) and w != prefix]
+            contextual = [w for w in context
+                          if trusted_personal(w) and w.startswith(prefix) and w != prefix]
             builtin = [w for w in common_rank if w.startswith(prefix) and w != prefix]
             candidates = set(static) | set(personal) | set(contextual) | set(builtin)
             candidates.discard(prefix)
@@ -1094,14 +1143,15 @@ class FireflyKeyboard:
                     if abs(len(w) - len(prefix)) <= 2 and w not in candidates
                 ]
                 pool += [w for w in self.learned_words
-                         if w[:1] == prefix[:1] and abs(len(w) - len(prefix)) <= 2]
+                         if trusted_personal(w) and w[:1] == prefix[:1]
+                         and abs(len(w) - len(prefix)) <= 2]
                 close = difflib.get_close_matches(prefix, pool, n=6, cutoff=0.60)
                 close.sort(key=lambda w: (
                     -difflib.SequenceMatcher(None, prefix, w).ratio(), *rank(w)
                 ))
                 choices.extend(close[:3 - len(choices)])
         else:
-            choices = sorted(context, key=rank)[:3]
+            choices = sorted((word for word in context if trusted_personal(word)), key=rank)[:3]
             if len(choices) < 3:
                 defaults = ("the", "I", "you")
                 choices.extend(w for w in defaults if w.casefold() not in
@@ -1259,16 +1309,38 @@ class FireflyKeyboard:
             if button.winfo_exists():
                 button.configure(text=letter.upper() if self.shifted else letter)
         if self.shift_button is not None and self.shift_button.winfo_exists():
-            self.shift_button.configure(
-                bg=LIME if self.shifted else KEY_ALT,
-                fg=BG if self.shifted else CYAN,
-            )
+            base = getattr(self.shift_button, "_firefly_base_style", {})
+            base.update({
+                "bg": LIME if self.shifted else KEY_ALT,
+                "fg": BG if self.shifted else CYAN,
+            })
+            self.shift_button._firefly_base_style = base
+            if self.shift_button is not self.nav_selected:
+                self.shift_button.configure(bg=base["bg"], fg=base["fg"])
 
     def _select_nav_button(self, button: tk.Button) -> None:
         if self.nav_selected and self.nav_selected.winfo_exists():
-            self.nav_selected.configure(highlightthickness=0)
+            base = getattr(self.nav_selected, "_firefly_base_style", None)
+            if base:
+                self.nav_selected.configure(highlightthickness=0, **base)
+            else:
+                self.nav_selected.configure(highlightthickness=0)
         self.nav_selected = button
-        button.configure(highlightthickness=3, highlightbackground=LIME, highlightcolor=LIME)
+        # A thin Tk focus ring is nearly invisible through AnyWare scaling.
+        # Fill the complete selected/hovered key so the state is unmistakable.
+        button.configure(
+            bg=LIME, fg=BG, activebackground=LIME, activeforeground=BG,
+            highlightthickness=3, highlightbackground=LIME,
+            highlightcolor=LIME, relief="solid", bd=2,
+        )
+
+    def _on_button_enter(self, button: tk.Button) -> None:
+        """Let real hover select, but never let remote drift steal the snap."""
+        if time.monotonic() < self.pointer_nav_lock_until and self.nav_selected:
+            return
+        self.remote_nav_until = 0.0
+        self.pointer_nav_direction_active = None
+        self._select_nav_button(button)
 
     def _button_at_point(self, x: int, y: int) -> tk.Button | None:
         widget = self.root.winfo_containing(x, y)
@@ -1321,33 +1393,37 @@ class FireflyKeyboard:
         if previous is None:
             self._handle_mouse_motion(point, None)
             return
-        if now < self.pointer_nav_lock_until:
-            # A remote tap is an accelerated stream, not one motion event.
-            # Keep the physical pointer on the selected key until that stream
-            # goes quiet so the following real OK click cannot drift elsewhere.
-            self.pointer_nav_lock_until = now + POINTER_NAV_LOCK_MS / 1000
-            self.remote_nav_until = self.pointer_nav_lock_until
-            self.mouse_motion_accum = [0, 0]
-            self._snap_pointer_to_selected()
-            return
-        if now - self.last_mouse_motion_at > 0.30:
+        if now - self.last_mouse_motion_at > 0.65:
             self.mouse_motion_accum = [0, 0]
         self.last_mouse_motion_at = now
         self.mouse_motion_accum[0] += point[0] - previous[0]
         self.mouse_motion_accum[1] += point[1] - previous[1]
-        direction = pointer_nav_direction(*self.mouse_motion_accum)
-        if direction is None:
+        action, direction, next_lock = pointer_nav_decision(
+            *self.mouse_motion_accum, now,
+            self.pointer_nav_direction_active,
+            self.pointer_nav_lock_until,
+            self.last_pointer_nav_at,
+        )
+        if action == "hover":
+            self.remote_nav_until = 0.0
+            self.pointer_nav_direction_active = None
+            self.mouse_motion_accum = [0, 0]
             self._handle_mouse_motion(point, None)
+            self._record_navigation_trace("hover", point[0] - previous[0], point[1] - previous[1], None)
             return
-        if (now - self.last_pointer_nav_at) * 1000 < POINTER_NAV_GUARD_MS:
+        self.pointer_nav_lock_until = next_lock
+        if action == "snap":
+            if direction is not None:
+                self.mouse_motion_accum = [0, 0]
             self._snap_pointer_to_selected()
+            self._record_navigation_trace("snap", point[0] - previous[0], point[1] - previous[1], direction)
             return
         self.last_pointer_nav_at = now
-        self.pointer_nav_lock_until = now + POINTER_NAV_LOCK_MS / 1000
+        self.pointer_nav_direction_active = direction
         self.mouse_motion_accum = [0, 0]
         self._navigate(direction)
-        self.remote_nav_until = self.pointer_nav_lock_until
         self._snap_pointer_to_selected()
+        self._record_navigation_trace("navigate", point[0] - previous[0], point[1] - previous[1], direction)
 
     def _snap_pointer_to_selected(self) -> None:
         """Place the real pointer on the selected key so physical OK activates it."""
@@ -1376,6 +1452,7 @@ class FireflyKeyboard:
             abs(point[1] - previous_point[1]) <= 18
         )
         self.last_ok_press = (point, now_ms)
+        self._record_navigation_trace("ok-duplicate" if duplicate else "ok", 0, 0, None)
         if duplicate:
             self.suppress_ok_once = True
             self.suppress_ok_until = time.monotonic() + 0.35
@@ -1417,6 +1494,8 @@ class FireflyKeyboard:
         else:
             self.last_mouse_point = None
             self.mouse_motion_accum = [0, 0]
+            self.pointer_nav_direction_active = None
+            self.pointer_nav_lock_until = 0.0
             self.root.attributes("-alpha", ALPHA_IDLE)
             self._apply_no_activate()
             # Never force application focus from a mere pointer move. In
@@ -1665,6 +1744,13 @@ class FireflyKeyboard:
             self._on_pointer_motion_event(hover_event)
         hover_followed = hover_target is not None and self.nav_selected is hover_target
         passed = burst_held and hover_followed
+        if passed and hover_target is not None:
+            # Keep the verified final state stable long enough for the visual
+            # regression screenshot; real <Enter> events must not steal it.
+            self._select_nav_button(hover_target)
+            self.pointer_nav_lock_until = time.monotonic() + 2.0
+            self.remote_nav_until = self.pointer_nav_lock_until
+            self._snap_pointer_to_selected()
         self.guard_var.set("D-PAD SNAP SELF-TEST " + ("PASS" if passed else "FAIL"))
         print("DPAD SNAP SELF-TEST " + ("PASS" if passed else "FAIL"), flush=True)
 
@@ -1940,6 +2026,35 @@ class FireflyKeyboard:
             if self.inspecting else "Inspector off — no keys recorded"
         )
         self.root.after_idle(self._rebuild_dock)
+
+    def _record_navigation_trace(self, decision: str, dx: int, dy: int,
+                                 direction: str | None) -> None:
+        """Keep a bounded, content-free trace for replaying real remote flows.
+
+        No typed letters, words, window titles, or absolute desktop coordinates
+        are stored. The selected control is only a transient numeric position.
+        """
+        try:
+            selected = (
+                self.nav_buttons.index(self.nav_selected)
+                if self.nav_selected in self.nav_buttons else -1
+            )
+            os.makedirs(os.path.dirname(self.nav_trace_path), exist_ok=True)
+            row = (
+                f"{time.time():.3f} decision={decision} dx={dx:+d} dy={dy:+d} "
+                f"direction={direction or '-'} selected={selected}\n"
+            )
+            with open(self.nav_trace_path, "a", encoding="utf-8") as trace:
+                trace.write(row)
+            if os.path.getsize(self.nav_trace_path) > 262_144:
+                with open(self.nav_trace_path, "rb") as trace:
+                    trace.seek(-131_072, os.SEEK_END)
+                    tail = trace.read()
+                newline = tail.find(b"\n")
+                with open(self.nav_trace_path, "wb") as trace:
+                    trace.write(tail[newline + 1:] if newline >= 0 else tail)
+        except (OSError, ValueError, AttributeError):
+            pass
 
     def _start_capture_log(self) -> None:
         """Append a new observation-only capture session to a local text log."""
