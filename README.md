@@ -46,7 +46,7 @@ The remote's measured OK/Select signal is also guarded once at the Firefly-windo
 
 ## D-pad snap navigation
 
-The remote desktop converts D-pad taps into accelerated pointer motion instead of `VK_LEFT/RIGHT/UP/DOWN`. While the pointer is over Firefly, strongly horizontal or vertical motion is therefore treated as one neighboring-key step and the pointer is snapped to that key's center. A **160 ms** burst guard prevents one accelerated tap from skipping several keys; the following physical OK click lands on the selected key. Diagonal mouse motion is left alone, and capture/inspector mode remains observation-only.
+The remote desktop converts D-pad taps into accelerated pointer motion instead of `VK_LEFT/RIGHT/UP/DOWN`. While the pointer is over Firefly, strongly horizontal or vertical motion is therefore treated as one neighboring-key step and the pointer is snapped to that key's center. A **160 ms** step guard plus a **240 ms quiet-period lock** keeps every follow-on event from the same accelerated tap pinned to that center, so the physical OK click cannot drift back to another key. Once the burst goes quiet, normal mouse hover immediately highlights the control underneath. Diagonal mouse motion is left alone, and capture/inspector mode remains observation-only except for hover highlighting.
 
 ## Map a TV remote
 
@@ -77,6 +77,7 @@ Open the **MOUSE** menu in Firefly's title row. These functions are available in
 **Drag between two desktop positions:** Press `DRAG FROM • 4.5s`, move the pointer to the drag start, and allow the countdown to capture it. Next press `DRAG TO • 4.5s`, move the pointer to the destination, and allow that countdown to capture the endpoint. Firefly inserts mouse-down, several moves and mouse-up in **one bounded SendInput batch**. It never intentionally keeps a button held between actions or while you move the TV remote. `CANCEL / CLEAR` discards a pending capture and its start position.
 
 Because the drag is a short synthesized sequence and not a physically held mouse button, some applications (including Citrix-hosted ones) may not recognize every drag. Windows may also deny input to elevated or secure surfaces, and a successful SendInput call does not prove the application acted. **Try a harmless file selection or text selection before relying on it for any consequential operation.** The regular OSK and Citrix input path remain available if Firefly exits.
+
 
 
 
