@@ -35,7 +35,7 @@ class StaticPredictionTests(unittest.TestCase):
         self.assertEqual(StaticNextWords.load("/nonexistent/firefly-table").rows, {})
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "bad.tsv"
-            path.write_text("broken row\\nhello\\tthere:bad!!\\nknown\\tgood:2\\n", encoding="utf-8")
+            path.write_text("broken row\nhello\tthere:bad!!\nknown\tgood:2\n", encoding="utf-8")
             model = StaticNextWords.load(str(path))
             self.assertEqual(model.candidates("known"), (("good", 2),))
             self.assertEqual(model.candidates("hello"), ())
