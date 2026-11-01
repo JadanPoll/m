@@ -410,7 +410,7 @@ class FireflyKeyboard:
                 takefocus=0,
             )
             self.suggestion_buttons.append(button)
-            self._register_nav_button(button)
+            self._register_nav_button(button, f"suggest:{index}")
             button.pack(side="left", expand=True, fill="x", padx=4)
         self._update_suggestions()
 
@@ -427,7 +427,9 @@ class FireflyKeyboard:
         self._register_nav_button(button)
         return button
 
-    def _register_nav_button(self, button: tk.Button) -> tk.Button:
+    def _register_nav_button(self, button: tk.Button, identity: str | None = None) -> tk.Button:
+        # Stable semantic identity survives recreating keys on Shift/Ctrl changes.
+        button._firefly_identity = identity or ("label:" + str(button.cget("text")))
         self.nav_buttons.append(button)
         button.configure(highlightthickness=0)
         button.bind("<Enter>", lambda _event, item=button: self._select_nav_button(item), add="+")
@@ -566,6 +568,9 @@ class FireflyKeyboard:
         ]
 
     def _build_keys(self) -> None:
+        # Rebuilding buttons must never redirect a remote OK press to another
+        # control (notably CLOSE). Keep the selected action, not widget identity.
+        selected_id = getattr(self.nav_selected, "_firefly_identity", None)
         for child in self.keyboard.winfo_children():
             child.destroy()
         self.nav_buttons = list(self.header_buttons) + list(self.suggestion_buttons)
@@ -581,11 +586,12 @@ class FireflyKeyboard:
             for col, (label, action) in enumerate(row):
                 frame.grid_columnconfigure(col, weight=2 if action in ("SHIFT", "BACK", "MODE") else 1, uniform="keys")
                 button = tk.Button(frame, text=label, command=lambda a=action: self.activate(a, lambda: self.key_action(a)),
-                                   bg=KEY_ALT if action in ("SHIFT", "BACK", "MODE") else KEY,
-                                   fg=CYAN if action in ("SHIFT", "BACK", "MODE") else INK,
+                                   bg=LIME if action == "SHIFT" and self.shifted else (KEY_ALT if action in ("SHIFT", "BACK", "MODE") else KEY),
+                                   fg=BG if action == "SHIFT" and self.shifted else (CYAN if action in ("SHIFT", "BACK", "MODE") else INK),
                                    activebackground=LIME, activeforeground=BG, relief="flat", bd=0,
                                    height=key_height, font=("Segoe UI", font_size, "bold"), takefocus=0)
-                self._register_nav_button(button)
+                key_id = "key:" + (action.lower() if len(action) == 1 and action.isalpha() else action)
+                self._register_nav_button(button, key_id)
                 button.grid(row=0, column=col, sticky="nsew", padx=4)
             frame.grid_rowconfigure(0, weight=1)
 
@@ -605,7 +611,8 @@ class FireflyKeyboard:
                                bg=color, fg=fg, activebackground=LIME, activeforeground=BG,
                                relief="flat", bd=0, height=key_height,
                                font=("Segoe UI", max(11, int(15 * self.scale)), "bold"), takefocus=0)
-            self._register_nav_button(button)
+            key_id = "key:" + (action.lower() if len(action) == 1 and action.isalpha() else action)
+            self._register_nav_button(button, key_id)
             button.grid(row=0, column=col, sticky="nsew", padx=4)
         frame.grid_rowconfigure(0, weight=1)
 
@@ -622,9 +629,13 @@ class FireflyKeyboard:
                                activebackground=KEY_ALT, activeforeground=INK,
                                relief="flat", bd=0, padx=13, pady=6,
                                font=("Segoe UI", 9, "bold"), takefocus=0)
-            self._register_nav_button(button)
+            self._register_nav_button(button, "key:" + str(action))
             button.pack(side="left", expand=True, fill="x", padx=3)
-        if self.pointer_inside:
+        restored = next((item for item in self.nav_buttons
+                         if getattr(item, "_firefly_identity", None) == selected_id), None)
+        if restored is not None:
+            self._select_nav_button(restored)
+        elif self.pointer_inside and time.monotonic() >= self.remote_nav_until:
             self.root.after_idle(self._select_pointer_button)
 
     def _select_nav_button(self, button: tk.Button) -> None:
@@ -642,6 +653,8 @@ class FireflyKeyboard:
         return None
 
     def _select_pointer_button(self) -> None:
+        if time.monotonic() < self.remote_nav_until and self.nav_selected:
+            return
         x, y = self.root.winfo_pointerxy()
         button = self._button_at_point(x, y)
         if button:
@@ -653,6 +666,8 @@ class FireflyKeyboard:
     def _handle_mouse_motion(self, point: tuple[int, int], direction: str | None) -> None:
         if direction:
             self._navigate(direction)
+            return
+        if time.monotonic() < self.remote_nav_until:
             return
         button = self._button_at_point(*point)
         if button:
@@ -932,6 +947,9 @@ class FireflyKeyboard:
 
     def key_action(self, action) -> None:
         if action == "SHIFT":
+            # Never leave a latent Ctrl chord that could send Ctrl+C/Ctrl+D
+            # to cmd/PowerShell when the user intended uppercase letters.
+            self.ctrl_held = False
             self.shifted = not self.shifted
             self._build_keys()
         elif action == "MODE":
@@ -939,6 +957,7 @@ class FireflyKeyboard:
             self.shifted = False
             self._build_keys()
         elif action == "CTRL":
+            self.shifted = False
             self.ctrl_held = not self.ctrl_held
             self._build_keys()
         elif action == "BACK":
