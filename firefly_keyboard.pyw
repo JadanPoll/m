@@ -1203,7 +1203,7 @@ class FireflyKeyboard:
                 self.ctrl_held = False
                 reset_layout = True
             else:
-                self._send_to_target(lambda: False, lambda hwnd: direct_text(hwnd, text))
+                self._send_to_target(lambda: send_unicode(text), lambda hwnd: direct_text(hwnd, text))
                 self._track_text(text)
             if self.shifted:
                 self.shifted = False
@@ -1219,7 +1219,7 @@ class FireflyKeyboard:
             self.ctrl_held = False
             self._build_keys()
         else:
-            self._send_to_target(lambda: False, lambda hwnd: direct_vk(hwnd, vk))
+            self._send_to_target(lambda: send_vk(vk), lambda hwnd: direct_vk(hwnd, vk))
 
     def _focused_control(self, target: int) -> int:
         thread_id = user32.GetWindowThreadProcessId(target, None)
@@ -1243,9 +1243,19 @@ class FireflyKeyboard:
                 user32.SetForegroundWindow(target)
                 if focused and focused != target:
                     user32.SetFocus(focused)
-                if not callback():
+                if user32.GetForegroundWindow() != target:
+                    # SendInput is global: do not spray keys into another window.
                     fallback(focused or target)
-                self.guard_var.set(f"Sent to {self._target_title(target)} · {self.blocked} blocked")
+                    self.guard_var.set(
+                        f"Target not foreground; posted input to {self._target_title(target)} (unverified)"
+                    )
+                elif callback():
+                    self.guard_var.set(f"Input sent to {self._target_title(target)} · {self.blocked} blocked")
+                else:
+                    fallback(focused or target)
+                    self.guard_var.set(
+                        f"Fallback posted to {self._target_title(target)} (delivery unverified)"
+                    )
             finally:
                 if attached:
                     user32.AttachThreadInput(current_thread, target_thread, False)
