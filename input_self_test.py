@@ -53,7 +53,8 @@ def check(*_args):
         root.after(100, root.destroy)
 
 value.trace_add("write", check)
-root.after(150, lambda: (root.focus_force(), entry.focus_force()))
+root.after(150, lambda: (root.focus_force(), entry.focus_force(), entry.icursor("end")))
 root.after(30000, lambda: (print(f"FAIL: received {value.get()!r}", flush=True), root.destroy()))
 root.mainloop()
+
 
