@@ -22,6 +22,8 @@ import zlib
 
 APP_TITLE = "Firefly Desk Keyboard"
 GUARD_MS = 300
+MENU_GUARD_MS = 700
+MOVE_MENU_GUARD_MS = 360
 NAV_GUARD_MS = 75
 BG = "#07111f"
 PANEL = "#0d1a2b"
@@ -405,6 +407,12 @@ class FireflyKeyboard:
         self._last_dock_top = 0
         self.collapsed = False
         self.show_apps = False
+        self.show_mouse = False
+        self.menu_last_ms: dict[str, float] = {}
+        self.mouse_target_kind: str | None = None
+        self.mouse_target_seq = 0
+        self.mouse_target_delay_ms = 4500
+        self.drag_start_point: tuple[int, int] | None = None
         self.shifted = False
         self.ctrl_held = False
         self.symbols = False
@@ -557,6 +565,7 @@ class FireflyKeyboard:
             return
 
         self._tool_button(title, "APPS", self.toggle_apps, CYAN, 6).pack(side="left", padx=3)
+        self._tool_button(title, "MOUSE", self.toggle_mouse, CYAN, 7).pack(side="left", padx=3)
         self._tool_button(title, "SIZE", self.toggle_size, CYAN, 6).pack(side="left", padx=3)
         self._tool_button(title, "×", self.request_close, RED, 3).pack(side="right", padx=3)
         self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 8)
@@ -582,6 +591,34 @@ class FireflyKeyboard:
                 self.quick_buttons.append(button)
                 self._register_nav_button(button, "app:" + app)
                 button.pack(side="left", expand=True, fill="x", padx=1)
+
+        if self.show_mouse:
+            mouse = tk.Frame(self.root, bg=BG, padx=4, pady=1)
+            mouse.pack(fill="x")
+            # This controller deliberately never intercepts the TV remote.
+            # Capture the *hovered* desktop point after a short countdown.
+            for label, mode in (
+                ("LEFT • 4.5s", "left"),
+                ("RIGHT • 4.5s", "right"),
+                ("DRAG FROM • 4.5s", "drag_start"),
+                ("DRAG TO • 4.5s", "drag_end"),
+            ):
+                button = tk.Button(
+                    mouse, text=label,
+                    command=lambda m=mode: self.activate("mouse:" + m, lambda: self._arm_mouse_target(m)),
+                    bg=KEY_ALT, fg=INK, relief="flat", bd=0,
+                    padx=2, pady=1, font=("Segoe UI", 8, "bold"), takefocus=0)
+                self.quick_buttons.append(button)
+                self._register_nav_button(button, "mouse:" + mode)
+                button.pack(side="left", expand=True, fill="x", padx=1)
+            cancel = tk.Button(
+                mouse, text="CANCEL / CLEAR",
+                command=lambda: self.activate("mouse:cancel", self._clear_mouse_target),
+                bg=PANEL, fg=RED, relief="flat", bd=0,
+                padx=2, pady=1, font=("Segoe UI", 8, "bold"), takefocus=0)
+            self.quick_buttons.append(cancel)
+            self._register_nav_button(cancel, "mouse:cancel")
+            cancel.pack(side="left", expand=True, fill="x", padx=1)
 
         # Keep predictions visible even when the app launcher is closed.
         suggest = tk.Frame(self.root, bg=BG, padx=5, pady=1)
@@ -613,12 +650,23 @@ class FireflyKeyboard:
 
     def toggle_collapse(self) -> None:
         self.collapsed = not self.collapsed
+        if self.collapsed:
+            self._cancel_mouse_targeting()
         # Rebuild after the current Tk Button.invoke returns; destroying a
         # widget inside its own callback has caused remote instability before.
         self.root.after_idle(self._rebuild_dock)
 
     def toggle_apps(self) -> None:
         self.show_apps = not self.show_apps
+        self.show_mouse = False
+        self._cancel_mouse_targeting()
+        self.root.after_idle(self._rebuild_dock)
+
+    def toggle_mouse(self) -> None:
+        self.show_mouse = not self.show_mouse
+        self.show_apps = False
+        if not self.show_mouse:
+            self._cancel_mouse_targeting()
         self.root.after_idle(self._rebuild_dock)
 
     @staticmethod
@@ -716,7 +764,9 @@ class FireflyKeyboard:
         )
 
     def _tool_button(self, parent, text, command, color, width):
-        button = tk.Button(parent, text=text, command=lambda: self.activate("tool:" + text, command),
+        # HIDE/SHOW are a *single logical toggle*, even across widget rebuilds.
+        logical = "visibility" if text in ("HIDE", "SHOW") else text
+        button = tk.Button(parent, text=text, command=lambda: self.activate("tool:" + logical, command),
                            bg=PANEL, fg=color, activebackground=KEY_ALT, activeforeground=INK,
                            relief="flat", bd=0, width=width, padx=5, pady=5,
                            font=("Segoe UI", 9, "bold"), takefocus=0)
@@ -1274,6 +1324,23 @@ class FireflyKeyboard:
 
     def activate(self, signature: str, action) -> None:
         now = time.perf_counter() * 1000
+        # Menu actions need a longer per-control guard than normal typing;
+        # the old last-action-only check allowed duplicated controls through
+        # after another event and HIDE/SHOW had mismatched identities.
+        if signature.startswith(("tool:", "app:", "mouse:")):
+            guard = MOVE_MENU_GUARD_MS if signature in ("tool:MOVE ↑", "tool:MOVE ↓") else MENU_GUARD_MS
+            if now - self.menu_last_ms.get(signature, -1e9) < guard:
+                self.blocked += 1
+                self.guard_var.set(f"Menu debounce: {signature} ({self.blocked} blocked)")
+                return
+            self.menu_last_ms[signature] = now
+            # Bound history without resetting recent keys.
+            if len(self.menu_last_ms) > 80:
+                self.menu_last_ms = {key: value for key, value in self.menu_last_ms.items()
+                                     if now - value <= MENU_GUARD_MS}
+            self.last_action = (signature, now)
+            action()
+            return
         last_sig, last_at = self.last_action
         if signature == last_sig and now - last_at < GUARD_MS:
             self.blocked += 1
