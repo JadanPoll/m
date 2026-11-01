@@ -24,6 +24,8 @@ APP_TITLE = "Firefly Desk Keyboard"
 GUARD_MS = 300
 MENU_GUARD_MS = 700
 MOVE_MENU_GUARD_MS = 360
+OPTION_GUARD_MS = 550
+REPEAT_OPTION_GUARD_MS = 140
 NAV_GUARD_MS = 75
 BG = "#07111f"
 PANEL = "#0d1a2b"
@@ -39,7 +41,6 @@ ALPHA_ACTIVE = 0.88
 MAX_DOCK_FRACTION = 0.46  # Comfortable keys without monopolizing the screen.
 DEFAULT_DOCK_FRACTION = 0.43
 MOVE_STEP_PX = 72
-
 
 def clamp_dock_top(requested: int, work_top: int, work_bottom: int, outer_height: int) -> int:
     """Keep the entire movable keyboard visible inside the remote desktop."""
@@ -86,6 +87,21 @@ VK_CONTROL = 0x11
 VK_LWIN = 0x5B
 VK_R = 0x52
 VK_V = 0x56
+# Editing/navigation options may be intentionally repeated. They still need a
+# short per-control guard for remotes that emit two clicks, but must not feel
+# like the slower toggle/action controls.
+REPEAT_OPTION_SUFFIXES = {
+    "BACK", str(VK_HOME), str(VK_END), str(VK_PRIOR), str(VK_NEXT),
+    str(VK_UP), str(VK_DOWN), str(VK_DELETE), "VK:37", "VK:39",
+}
+REMOTE_VK_NAMES = {
+    0x01: "MOUSE LEFT", 0x02: "MOUSE RIGHT", 0x04: "MOUSE MIDDLE",
+    VK_BACK: "BACKSPACE", VK_TAB: "TAB", VK_RETURN: "ENTER",
+    VK_CONTROL: "CTRL", VK_ESCAPE: "ESC", VK_SPACE: "SPACE",
+    VK_PRIOR: "PAGE UP", VK_NEXT: "PAGE DOWN", VK_END: "END",
+    VK_HOME: "HOME", VK_LEFT: "LEFT", VK_UP: "UP",
+    VK_RIGHT: "RIGHT", VK_DOWN: "DOWN", VK_DELETE: "DELETE",
+}
 ERROR_ALREADY_EXISTS = 183
 WS_EX_NOACTIVATE = 0x08000000
 WS_EX_TOOLWINDOW = 0x00000080
@@ -472,6 +488,7 @@ class FireflyKeyboard:
         self.show_apps = False
         self.show_mouse = False
         self.menu_last_ms: dict[str, float] = {}
+        self.option_last_ms: dict[str, float] = {}
         self.mouse_target_kind: str | None = None
         self.mouse_target_seq = 0
         self.mouse_target_delay_ms = 4500
@@ -481,7 +498,8 @@ class FireflyKeyboard:
         self.symbols = False
         self.last_action = ("", 0.0)
         self.blocked = 0
-        self.inspecting = False
+        self.capture_mode = "--capture-remote" in sys.argv
+        self.inspecting = self.capture_mode
         # Illinois AnyWare / TV-remote fallback: do not install hooks or
         # consume OS-level input unless explicitly requested by an operator.
         self.safe_mode = "--advanced-input" not in sys.argv
@@ -503,6 +521,10 @@ class FireflyKeyboard:
         self.shift_button: tk.Button | None = None
         local_data = os.environ.get("LOCALAPPDATA", os.path.dirname(__file__))
         self.learning_path = os.path.join(local_data, "FireflyDeskKeyboard", "language.json")
+        self.capture_path = os.path.join(local_data, "FireflyDeskKeyboard", "remote-input-capture.log")
+        self.capture_mouse_point: tuple[int, int] | None = None
+        self.capture_pointer_accum = [0, 0]
+        self.capture_pointer_last_log = 0.0
         self.nav_buttons: list[tk.Button] = []
         self.nav_selected: tk.Button | None = None
         # All remote-input sampling happens on Tk's main thread; no ctypes
@@ -525,7 +547,13 @@ class FireflyKeyboard:
         self.last_external_hwnd = previous_foreground
         self.target_var = tk.StringVar(value="Target: detecting…")
         self.guard_var = tk.StringVar(value=f"{GUARD_MS} ms guard · 0 blocked")
-        self.inspect_var = tk.StringVar(value="Inspector off — click INSPECT, then press the unknown remote button")
+        self.inspect_var = tk.StringVar(value=(
+            "CAPTURE READY — press every remote button once"
+            if self.capture_mode else
+            "Inspector off — click INSPECT, then press the unknown remote button"
+        ))
+        if self.capture_mode:
+            self._start_capture_log()
         self._load_language_model()
         self._configure_window()
         self._build()
@@ -638,6 +666,14 @@ class FireflyKeyboard:
         tk.Label(title, textvariable=self.guard_var, fg=CYAN, bg=BG,
                  font=("Segoe UI", 8), width=43, anchor="e").pack(side="right", padx=3)
 
+        if self.inspecting:
+            capture = tk.Frame(self.root, bg=PANEL, padx=6, pady=3)
+            capture.pack(fill="x", padx=4, pady=(1, 0))
+            tk.Label(capture, text="REMOTE CAPTURE", fg=RED, bg=PANEL,
+                     font=("Segoe UI", 8, "bold")).pack(side="left", padx=(0, 8))
+            tk.Label(capture, textvariable=self.inspect_var, fg=INK, bg=PANEL,
+                     font=("Consolas", 9), anchor="w").pack(side="left", fill="x", expand=True)
+
         if self.show_apps:
             quick = tk.Frame(self.root, bg=BG, padx=4, pady=1)
             quick.pack(fill="x")
@@ -692,7 +728,7 @@ class FireflyKeyboard:
             button = tk.Button(
                 suggest, text="…",
                 command=lambda i=index: self.activate(
-                    f"suggest:{i}", lambda: self._accept_suggestion(i)),
+                    f"option:suggest:{i}", lambda: self._accept_suggestion(i)),
                 bg=KEY_ALT, fg=INK, relief="flat", bd=0,
                 pady=1, font=("Segoe UI", 10, "bold"), takefocus=0)
             self.suggestion_buttons.append(button)
@@ -1105,6 +1141,8 @@ class FireflyKeyboard:
         # After one-shot Shift clears, it must produce "a", not another "A".
         actual = (action.upper() if self.shifted else action.lower()) if is_letter else action
         signature = "key:" + action.lower() if is_letter else action
+        if not is_letter:
+            signature = "option:" + str(action)
         self.activate(signature, lambda value=actual: self.key_action(value))
 
     def _build_keys(self) -> None:
@@ -1130,7 +1168,7 @@ class FireflyKeyboard:
                      ("▲", VK_UP), ("▼", VK_DOWN), ("DELETE", VK_DELETE), ("PASTE", "PASTE")]
         for label, action in utilities:
             active_modifier = action == "CTRL" and self.ctrl_held
-            button = tk.Button(utility, text=label, command=lambda a=action: self.activate(str(a), lambda: self.key_action(a)),
+            button = tk.Button(utility, text=label, command=lambda a=action: self.activate("option:" + str(a), lambda: self.key_action(a)),
                                bg=LIME if active_modifier else PANEL,
                                fg=BG if active_modifier else MUTED,
                                activebackground=KEY_ALT, activeforeground=INK,
@@ -1169,7 +1207,8 @@ class FireflyKeyboard:
         for col, (label, action, weight, color) in enumerate(bottom):
             frame.grid_columnconfigure(col, weight=weight)
             fg = BG if color == LIME else (CYAN if color == KEY_ALT else INK)
-            button = tk.Button(frame, text=label, command=lambda a=action: self.activate(a, lambda: self.key_action(a)),
+            signature = ("option:" + str(action)) if action in ("MODE", "VK:27", "VK:9", "VK:37", "VK:39", "VK:13") else str(action)
+            button = tk.Button(frame, text=label, command=lambda a=action, s=signature: self.activate(s, lambda: self.key_action(a)),
                                bg=color, fg=fg, activebackground=LIME, activeforeground=BG,
                                relief="flat", bd=0, height=key_height,
                                font=("Segoe UI", max(9, int(12 * self.scale)), "bold"), takefocus=0)
@@ -1356,24 +1395,53 @@ class FireflyKeyboard:
             # cannot identify a scan code or recover input that Citrix discarded.
             sampled_keys = range(1, 255) if self.inspecting else virtual_keys
             new_presses: set[int] = set()
+            new_releases: set[int] = set()
+            short_pulses: set[int] = set()
             for vk in sampled_keys:
-                down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
-                if down and not self.remote_previous_down.get(vk, False):
+                sampled = int(user32.GetAsyncKeyState(vk)) & 0xFFFF
+                down = bool(sampled & 0x8000)
+                pressed_since_poll = bool(sampled & 0x0001)
+                was_down = self.remote_previous_down.get(vk, False)
+                if down and not was_down:
                     new_presses.add(vk)
+                elif not down and was_down:
+                    new_releases.add(vk)
+                elif self.inspecting and pressed_since_poll:
+                    # A very short remote tap may start and finish between
+                    # 15 ms polls. Windows only exposes that as a best-effort
+                    # low-bit pulse, without a trustworthy hold duration.
+                    short_pulses.add(vk)
                 self.remote_previous_down[vk] = down
 
             if self.inspecting:
-                now_ms = time.monotonic() * 1000
                 for vk in sorted(new_presses):
-                    self.event_rows.append(f"VK=0x{vk:02X} ({vk}) @ {now_ms:.0f}ms")
-                self.event_rows = self.event_rows[-3:]
-                if new_presses:
-                    self.inspect_var.set("  |  ".join(self.event_rows))
+                    self._record_remote_event("DOWN", vk)
+                for vk in sorted(new_releases):
+                    self._record_remote_event("UP", vk)
+                for vk in sorted(short_pulses - new_presses - new_releases):
+                    self._record_remote_event("PULSE", vk)
+                point = tuple(int(value) for value in self.root.winfo_pointerxy())
+                if self.capture_mouse_point is None:
+                    self.capture_mouse_point = point
+                elif point != self.capture_mouse_point:
+                    dx = point[0] - self.capture_mouse_point[0]
+                    dy = point[1] - self.capture_mouse_point[1]
+                    self.capture_mouse_point = point
+                    self.capture_pointer_accum[0] += dx
+                    self.capture_pointer_accum[1] += dy
+                    now = time.monotonic()
+                    if now - self.capture_pointer_last_log >= 0.08:
+                        total_x, total_y = self.capture_pointer_accum
+                        self.capture_pointer_accum = [0, 0]
+                        self.capture_pointer_last_log = now
+                        self._record_capture_line(
+                            f"POINTER dx={total_x:+d} dy={total_y:+d} at=({point[0]},{point[1]})"
+                        )
 
             if self.safe_mode:
                 # Diagnostics are observation-only: remote keys continue to
                 # Citrix and their actual destination untouched.
-                self.root.after(50 if self.inspecting else 100, self._poll_remote_input)
+                self.root.after(15 if self.inspecting else 100, self._poll_remote_input)
                 return
 
             if self.pointer_mode is not None and time.monotonic() >= self.pointer_arm_after:
@@ -1480,6 +1548,25 @@ class FireflyKeyboard:
             if len(self.menu_last_ms) > 80:
                 self.menu_last_ms = {key: value for key, value in self.menu_last_ms.items()
                                      if now - value <= MENU_GUARD_MS}
+            self.last_action = (signature, now)
+            action()
+            return
+        if signature.startswith("option:"):
+            suffix = signature.removeprefix("option:")
+            guard = (REPEAT_OPTION_GUARD_MS if suffix in REPEAT_OPTION_SUFFIXES
+                     else OPTION_GUARD_MS)
+            if now - self.option_last_ms.get(signature, -1e9) < guard:
+                self.blocked += 1
+                self.guard_var.set(
+                    f"Option debounce: {suffix} ({self.blocked} blocked)"
+                )
+                return
+            self.option_last_ms[signature] = now
+            if len(self.option_last_ms) > 80:
+                self.option_last_ms = {
+                    key: value for key, value in self.option_last_ms.items()
+                    if now - value <= OPTION_GUARD_MS
+                }
             self.last_action = (signature, now)
             action()
             return
@@ -1671,6 +1758,11 @@ class FireflyKeyboard:
         self.inspecting = not self.inspecting
         self.event_rows.clear()
         self.remote_previous_down.clear()
+        self.capture_mouse_point = None
+        self.capture_pointer_accum = [0, 0]
+        self.capture_pointer_last_log = 0.0
+        if self.inspecting:
+            self._start_capture_log()
         self.inspect_button.configure(
             text="INSPECTING" if self.inspecting else "INSPECT",
             fg=RED if self.inspecting else LIME,
@@ -1679,6 +1771,41 @@ class FireflyKeyboard:
             "Listening for native virtual keys; scan codes unavailable (no hooks)"
             if self.inspecting else "Inspector off — no keys recorded"
         )
+        self.root.after_idle(self._rebuild_dock)
+
+    def _start_capture_log(self) -> None:
+        """Append a new observation-only capture session to a local text log."""
+        try:
+            os.makedirs(os.path.dirname(self.capture_path), exist_ok=True)
+            with open(self.capture_path, "a", encoding="utf-8") as capture:
+                capture.write(
+                    f"\n--- Firefly remote capture {time.strftime('%Y-%m-%d %H:%M:%S')} ---\n"
+                )
+        except OSError as error:
+            self.inspect_var.set("Capture visible only; log unavailable: " + str(error)[:55])
+
+    def _record_capture_line(self, message: str) -> None:
+        wall = time.time()
+        stamp = time.strftime("%H:%M:%S", time.localtime(wall)) + f".{int(wall * 1000) % 1000:03d}"
+        row = f"{stamp} {message}"
+        self.event_rows.append(row)
+        self.event_rows = self.event_rows[-4:]
+        self.inspect_var.set("  |  ".join(self.event_rows))
+        try:
+            os.makedirs(os.path.dirname(self.capture_path), exist_ok=True)
+            with open(self.capture_path, "a", encoding="utf-8") as capture:
+                capture.write(row + "\n")
+        except OSError:
+            pass
+
+    def _record_remote_event(self, state: str, vk: int) -> None:
+        name = REMOTE_VK_NAMES.get(vk)
+        if name is None:
+            if 0x30 <= vk <= 0x39 or 0x41 <= vk <= 0x5A:
+                name = chr(vk)
+            else:
+                name = "UNKNOWN"
+        self._record_capture_line(f"{state:<4} VK=0x{vk:02X} ({vk:3d}) {name}")
 
     def save_screenshot_bmp(self, path: str) -> None:
         """Capture this window to BMP and PNG without external packages."""
@@ -1838,6 +1965,7 @@ if __name__ == "__main__":
             kernel32.CloseHandle(singleton)
         if log_file is not None:
             log_file.close()
+
 
 
 
