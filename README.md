@@ -21,6 +21,10 @@ Startup and Tk callback errors are appended to `%LOCALAPPDATA%\FireflyDeskKeyboa
 
 The Illinois AnyWare service may disconnect idle sessions after 15 minutes and log them off one hour after disconnection. Save critical work to a persistent university-supported location.
 
+## Restored screen layout and transparency
+
+The idle keyboard is **24% opaque** again, becoming **88% opaque** when the remote pointer enters it. The keyboard now sizes itself from Tk's requested height after the app and prediction strips have been built, rather than reusing the old pre-shortcut 380px/49%-of-screen calculation. `SIZE` and `TOP/BOTTOM` also refit the window so **CTRL, HOME, END, PAGE, arrow, DELETE and PASTE** below ENTER remain visible when the AnyWare work area allows the full layout.
+
 ## Remote interaction
 
 - In **safe mode**, click/tap the visible Firefly keys using the remote-controlled pointer; the standard Windows input path handles remote clicks. The 300 ms identical-action guard mitigates accidentally doubled remote clicks, but can also suppress genuinely rapid repeated characters.
@@ -46,7 +50,9 @@ If the Citrix touch client exposes gestures, Citrix documents touch-hold-release
 
 ## Predictive text
 
-The three WORDS keys offer word completions and explicit spelling suggestions. Predictions now rank candidates using the preceding word (locally learned bigrams), individual learned word frequency, and the small built-in common-words list, with local spelling-dictionary additions. **Suggestions are never auto-inserted.** Selecting one replaces the current word and appends a space.
+The three WORDS keys offer word completions and explicit spelling suggestions. The predictor now prioritizes **real prefix completions** (never the already-typed prefix), ranks by learned preceding-word context and word frequency, and considers common transposition typos when completions are scarce. **Suggestions are never auto-inserted.**
+
+When a suggestion *completes* the existing prefix, Firefly sends only the missing suffix plus space, preserving already typed letters. When the suggestion is a correction, it sends a single ordered Windows input batch of Backspaces and replacement characters. **Neither case silently clears the predictor or learns the suggestion if SendInput reports failure.** This also avoids posting individual WM_CHAR messages to modern applications that may ignore them. Because Windows can accept input without the target consuming it, verify the result in the actual text field.
 
 Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json` when Firefly closes normally. No cloud service is used. **Do not type secrets through the keyboard unless you accept that its local learning model can record the typed words.** The current model is intentionally lightweight; for larger vocabulary and typo correction, see [SymSpellPy](https://github.com/mammothb/symspellpy) and [Presage](https://presage.sourceforge.io/) as research directions, not installed dependencies.
 
