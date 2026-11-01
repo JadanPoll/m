@@ -28,6 +28,7 @@ OPTION_GUARD_MS = 550
 REPEAT_OPTION_GUARD_MS = 140
 NAV_GUARD_MS = 75
 POINTER_NAV_GUARD_MS = 160
+POINTER_NAV_LOCK_MS = 240
 POINTER_NAV_THRESHOLD_PX = 4
 GLOBAL_OK_GUARD_MS = 120
 BG = "#07111f"
@@ -555,6 +556,7 @@ class FireflyKeyboard:
         self.last_nav_action = ("", 0.0)
         self.remote_nav_until = 0.0
         self.last_pointer_nav_at = 0.0
+        self.pointer_nav_lock_until = 0.0
         self.pointer_warp_until = 0.0
         self.pointer_warp_point: tuple[int, int] | None = None
         self.last_ok_press: tuple[tuple[int, int] | None, float] = (None, 0.0)
@@ -1303,6 +1305,7 @@ class FireflyKeyboard:
         now = time.monotonic()
         if self.capture_mode or self.inspecting:
             self.last_mouse_point = point
+            self._handle_mouse_motion(point, None)
             return
         if not self.pointer_inside:
             self._set_pointer_inside(True)
@@ -1316,6 +1319,16 @@ class FireflyKeyboard:
         previous = self.last_mouse_point
         self.last_mouse_point = point
         if previous is None:
+            self._handle_mouse_motion(point, None)
+            return
+        if now < self.pointer_nav_lock_until:
+            # A remote tap is an accelerated stream, not one motion event.
+            # Keep the physical pointer on the selected key until that stream
+            # goes quiet so the following real OK click cannot drift elsewhere.
+            self.pointer_nav_lock_until = now + POINTER_NAV_LOCK_MS / 1000
+            self.remote_nav_until = self.pointer_nav_lock_until
+            self.mouse_motion_accum = [0, 0]
+            self._snap_pointer_to_selected()
             return
         if now - self.last_mouse_motion_at > 0.30:
             self.mouse_motion_accum = [0, 0]
@@ -1324,12 +1337,16 @@ class FireflyKeyboard:
         self.mouse_motion_accum[1] += point[1] - previous[1]
         direction = pointer_nav_direction(*self.mouse_motion_accum)
         if direction is None:
+            self._handle_mouse_motion(point, None)
             return
         if (now - self.last_pointer_nav_at) * 1000 < POINTER_NAV_GUARD_MS:
+            self._snap_pointer_to_selected()
             return
         self.last_pointer_nav_at = now
+        self.pointer_nav_lock_until = now + POINTER_NAV_LOCK_MS / 1000
         self.mouse_motion_accum = [0, 0]
         self._navigate(direction)
+        self.remote_nav_until = self.pointer_nav_lock_until
         self._snap_pointer_to_selected()
 
     def _snap_pointer_to_selected(self) -> None:
@@ -1603,7 +1620,7 @@ class FireflyKeyboard:
         self.root.after(430, lambda: self.nav_selected.invoke() if self.nav_selected else None)
 
     def _run_dpad_snap_self_test(self) -> None:
-        """Verify one axis-only pointer burst selects and snaps q -> w."""
+        """Verify a multi-event burst stays snapped, then hover takes over."""
         self.capture_mode = False
         self.inspecting = False
         self.pointer_inside = True
@@ -1622,7 +1639,32 @@ class FireflyKeyboard:
         self.last_mouse_motion_at = time.monotonic()
         event = type("MotionEvent", (), {"x_root": start[0] + 8, "y_root": start[1]})()
         self._on_pointer_motion_event(event)
-        passed = self.nav_selected is expected
+        expected_point = (
+            expected.winfo_rootx() + expected.winfo_width() // 2,
+            expected.winfo_rooty() + expected.winfo_height() // 2,
+        )
+        follow_on = type(
+            "MotionEvent", (),
+            {"x_root": expected_point[0] + 35, "y_root": expected_point[1]},
+        )()
+        self._on_pointer_motion_event(follow_on)
+        burst_held = self.nav_selected is expected and self.pointer_warp_point == expected_point
+
+        hover_target = next((item for item in self.nav_buttons if item.cget("text") == "e"), None)
+        self.pointer_nav_lock_until = 0.0
+        self.remote_nav_until = 0.0
+        self.last_mouse_point = None
+        if hover_target is not None:
+            hover_event = type(
+                "MotionEvent", (),
+                {
+                    "x_root": hover_target.winfo_rootx() + hover_target.winfo_width() // 2,
+                    "y_root": hover_target.winfo_rooty() + hover_target.winfo_height() // 2,
+                },
+            )()
+            self._on_pointer_motion_event(hover_event)
+        hover_followed = hover_target is not None and self.nav_selected is hover_target
+        passed = burst_held and hover_followed
         self.guard_var.set("D-PAD SNAP SELF-TEST " + ("PASS" if passed else "FAIL"))
         print("DPAD SNAP SELF-TEST " + ("PASS" if passed else "FAIL"), flush=True)
 
@@ -2106,6 +2148,7 @@ if __name__ == "__main__":
             kernel32.CloseHandle(singleton)
         if log_file is not None:
             log_file.close()
+
 
 
 
