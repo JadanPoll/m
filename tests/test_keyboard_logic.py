@@ -7,8 +7,24 @@ Firefly = ns["FireflyKeyboard"]
 
 
 class FireflyLogicTests(unittest.TestCase):
-    def test_dock_never_uses_half_the_screen(self):
-        self.assertLessEqual(ns["MAX_DOCK_FRACTION"], 0.34)
+    def test_dock_is_comfortable_but_still_below_half_screen(self):
+        self.assertGreater(ns["DEFAULT_DOCK_FRACTION"], 0.40)
+        self.assertLess(ns["MAX_DOCK_FRACTION"], 0.50)
+        self.assertLessEqual(ns["DEFAULT_DOCK_FRACTION"], ns["MAX_DOCK_FRACTION"])
+
+    def test_keyboard_position_clamps_to_both_work_area_edges(self):
+        clamp = ns["clamp_dock_top"]
+        self.assertEqual(clamp(-200, 20, 820, 360), 20)
+        self.assertEqual(clamp(700, 20, 820, 360), 460)
+        self.assertEqual(clamp(150, 20, 820, 360), 150)
+        self.assertEqual(clamp(100, 20, 120, 180), 20)
+
+    def test_move_step_can_reach_screen_top_incrementally(self):
+        clamp = ns["clamp_dock_top"]
+        y = 450
+        for _ in range(10):
+            y = clamp(y - ns["MOVE_STEP_PX"], 0, 800, 350)
+        self.assertEqual(y, 0)
 
     def test_shift_key_action_follows_current_mode(self):
         keyboard = Firefly.__new__(Firefly)
