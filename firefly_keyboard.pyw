@@ -414,8 +414,9 @@ class FireflyKeyboard:
         self._configure_window()
         self._build()
         self.root.after(150, self._apply_no_activate)
-        if not self.safe_mode:
-            self.root.after(180, self._poll_remote_input)
+        # A single Tk timer samples remote input even in safe mode, but
+        # navigation dispatch is opt-in. Polling does not swallow OS events.
+        self.root.after(180, self._poll_remote_input)
         self.root.after(250, self._update_target)
         self.root.after(300, self._poll_pointer)
         self.root.protocol("WM_DELETE_WINDOW", self.request_close)
@@ -479,8 +480,6 @@ class FireflyKeyboard:
         self._tool_button(title, "SIZE", self.toggle_size, CYAN, 7).pack(side="right", padx=3)
         self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 10)
         self.inspect_button.pack(side="right", padx=3)
-        if self.safe_mode:
-            self.inspect_button.configure(state="disabled")
 
         status = tk.Frame(self.root, bg=PANEL, padx=16, pady=7)
         status.pack(fill="x", padx=12)
@@ -542,7 +541,7 @@ class FireflyKeyboard:
         self._update_suggestions()
 
         if self.safe_mode:
-            self.inspect_var.set("SAFE POINTER MODE: no global hooks · Windows OSK available · remote D-pad interception off")
+            self.inspect_var.set("SAFE: no hooks · INSPECT observes VKs · Windows OSK remains available")
         self.keyboard = tk.Frame(self.root, bg=BG, padx=10, pady=9)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
@@ -1024,12 +1023,29 @@ class FireflyKeyboard:
         try:
             virtual_keys = (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_RETURN,
                             VK_SPACE, VK_ESCAPE, 0x01)
+            # Only broad-scan while the inspector is enabled. GetAsyncKeyState
+            # cannot identify a scan code or recover input that Citrix discarded.
+            sampled_keys = range(1, 255) if self.inspecting else virtual_keys
             new_presses: set[int] = set()
-            for vk in virtual_keys:
+            for vk in sampled_keys:
                 down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
                 if down and not self.remote_previous_down.get(vk, False):
                     new_presses.add(vk)
                 self.remote_previous_down[vk] = down
+
+            if self.inspecting:
+                now_ms = time.monotonic() * 1000
+                for vk in sorted(new_presses):
+                    self.event_rows.append(f"VK=0x{vk:02X} ({vk}) @ {now_ms:.0f}ms")
+                self.event_rows = self.event_rows[-3:]
+                if new_presses:
+                    self.inspect_var.set("  |  ".join(self.event_rows))
+
+            if self.safe_mode:
+                # Diagnostics are observation-only: remote keys continue to
+                # Citrix and their actual destination untouched.
+                self.root.after(50 if self.inspecting else 100, self._poll_remote_input)
+                return
 
             if self.pointer_mode is not None and time.monotonic() >= self.pointer_arm_after:
                 if VK_ESCAPE in new_presses:
@@ -1290,10 +1306,18 @@ class FireflyKeyboard:
         self.root.after(500, self._update_target)
 
     def toggle_inspector(self) -> None:
-        # The old WINFUNCTYPE-based keyboard inspector was removed because
-        # callbacks into Tk from low-level hooks can fatally corrupt thread
-        # state. A future non-intercepting inspector can use Raw Input.
-        self.guard_var.set("Inspector unavailable: unsafe global hook removed")
+        """Inspect VK state transitions without system hooks or Tk re-entrancy."""
+        self.inspecting = not self.inspecting
+        self.event_rows.clear()
+        self.remote_previous_down.clear()
+        self.inspect_button.configure(
+            text="INSPECTING" if self.inspecting else "INSPECT",
+            fg=RED if self.inspecting else LIME,
+        )
+        self.inspect_var.set(
+            "Listening for native virtual keys; scan codes unavailable (no hooks)"
+            if self.inspecting else "Inspector off — no keys recorded"
+        )
 
     def save_screenshot_bmp(self, path: str) -> None:
         """Capture this window to BMP and PNG without external packages."""
