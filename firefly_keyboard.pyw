@@ -783,7 +783,7 @@ class FireflyKeyboard:
                     if abs(len(word) - len(prefix)) <= 2 and
                     word[:1] == prefix[:1] and word not in completions and word != prefix
                 ]
-                close = difflib.get_close_matches(prefix, candidates, n=6, cutoff=0.7)
+                close = difflib.get_close_matches(prefix, candidates, n=6, cutoff=0.60)
                 close.sort(key=lambda word: (
                     -difflib.SequenceMatcher(None, prefix, word).ratio(), *rank(word)
                 ))
