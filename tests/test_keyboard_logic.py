@@ -19,7 +19,11 @@ class FireflyLogicTests(unittest.TestCase):
         keyboard._invoke_layout_key("a")
         keyboard.shifted = True
         keyboard._invoke_layout_key("a")
-        self.assertEqual(received, ["a", "A"])
+        # A prebuilt button can still capture uppercase action after the
+        # one-shot toggle turns off; it must then send lowercase.
+        keyboard.shifted = False
+        keyboard._invoke_layout_key("A")
+        self.assertEqual(received, ["a", "A", "a"])
 
     def test_local_prefix_dictionary(self):
         keyboard = Firefly.__new__(Firefly)
