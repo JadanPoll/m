@@ -63,12 +63,16 @@ SWP_NOSIZE = 0x0001
 SWP_NOACTIVATE = 0x0010
 SW_RESTORE = 9
 WH_KEYBOARD_LL = 13
+WH_MOUSE_LL = 14
 HC_ACTION = 0
 LLKHF_INJECTED = 0x10
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
+WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
 WM_CHAR = 0x0102
 WM_PASTE = 0x0302
 WM_CLOSE = 0x0010
@@ -99,6 +103,16 @@ class KBDLLHOOKSTRUCT(ctypes.Structure):
                 ("dwExtraInfo", ULONG_PTR)]
 
 
+class POINT(ctypes.Structure):
+    _fields_ = [("x", wintypes.LONG), ("y", wintypes.LONG)]
+
+
+class MSLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [("pt", POINT), ("mouseData", wintypes.DWORD),
+                ("flags", wintypes.DWORD), ("time", wintypes.DWORD),
+                ("dwExtraInfo", ULONG_PTR)]
+
+
 class RECT(ctypes.Structure):
     _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
                 ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
@@ -124,6 +138,12 @@ class BITMAPINFOHEADER(ctypes.Structure):
 user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.SendInput.restype = wintypes.UINT
 HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+user32.SetWindowsHookExW.argtypes = (ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD)
+user32.SetWindowsHookExW.restype = wintypes.HANDLE
+user32.CallNextHookEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
+user32.CallNextHookEx.restype = LRESULT
+user32.UnhookWindowsHookEx.argtypes = (wintypes.HANDLE,)
+user32.UnhookWindowsHookEx.restype = wintypes.BOOL
 
 
 def send_input(item: INPUT) -> bool:
@@ -212,6 +232,10 @@ class FireflyKeyboard:
         self.hook_proc = HOOKPROC(self._keyboard_hook)
         self.nav_hook = None
         self.nav_hook_proc = HOOKPROC(self._navigation_hook)
+        self.mouse_hook = None
+        self.mouse_hook_proc = HOOKPROC(self._mouse_navigation_hook)
+        self.last_mouse_point: tuple[int, int] | None = None
+        self.close_armed_until = 0.0
         self.event_rows: list[str] = []
         self.last_native_at = 0
         self.last_external_hwnd = previous_foreground
@@ -222,9 +246,10 @@ class FireflyKeyboard:
         self._build()
         self.root.after(150, self._apply_no_activate)
         self.root.after(180, self._install_navigation_hook)
+        self.root.after(190, self._install_mouse_hook)
         self.root.after(250, self._update_target)
         self.root.after(300, self._poll_pointer)
-        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.protocol("WM_DELETE_WINDOW", self.request_close)
 
     def _configure_window(self) -> None:
         work = RECT()
@@ -268,7 +293,7 @@ class FireflyKeyboard:
                  font=("Segoe UI", 14, "bold")).pack(side="left")
         tk.Label(title, textvariable=self.target_var, fg=MUTED, bg=BG,
                  font=("Segoe UI", 10)).pack(side="left", padx=22)
-        self._tool_button(title, "×", self.close, RED, 4).pack(side="right", padx=3)
+        self._tool_button(title, "×", self.request_close, RED, 4).pack(side="right", padx=3)
         self._tool_button(title, "TOP/BOTTOM", self.toggle_dock, CYAN, 12).pack(side="right", padx=3)
         self._tool_button(title, "SIZE", self.toggle_size, CYAN, 7).pack(side="right", padx=3)
         self.inspect_button = self._tool_button(title, "INSPECT", self.toggle_inspector, LIME, 10)
@@ -297,7 +322,6 @@ class FireflyKeyboard:
     def _register_nav_button(self, button: tk.Button) -> tk.Button:
         self.nav_buttons.append(button)
         button.configure(highlightthickness=0)
-        button.bind("<Enter>", lambda _event, item=button: self._select_nav_button(item), add="+")
         return button
 
     def _layout(self):
@@ -404,10 +428,12 @@ class FireflyKeyboard:
             return
         self.pointer_inside = inside
         if inside:
+            self.last_mouse_point = self.root.winfo_pointerxy()
             self.root.attributes("-alpha", ALPHA_ACTIVE)
             self._select_pointer_button()
-            self.guard_var.set("ARROWS navigate · ENTER presses · target focus preserved")
+            self.guard_var.set("REMOTE DIRECTIONS navigate · CLICK/OK presses")
         else:
+            self.last_mouse_point = None
             self.root.attributes("-alpha", ALPHA_IDLE)
             self._apply_no_activate()
             target = self.last_external_hwnd
@@ -478,6 +504,40 @@ class FireflyKeyboard:
                 WH_KEYBOARD_LL, self.nav_hook_proc, kernel32.GetModuleHandleW(None), 0
             )
 
+    def _install_mouse_hook(self) -> None:
+        if not self.mouse_hook:
+            self.mouse_hook = user32.SetWindowsHookExW(
+                WH_MOUSE_LL, self.mouse_hook_proc, kernel32.GetModuleHandleW(None), 0
+            )
+
+    def _mouse_navigation_hook(self, n_code, w_param, l_param):
+        """Translate remote-generated pointer motion into keyboard navigation."""
+        if n_code == HC_ACTION and self.pointer_inside:
+            data = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            point = (int(data.pt.x), int(data.pt.y))
+            if w_param == WM_MOUSEMOVE:
+                previous = self.last_mouse_point
+                self.last_mouse_point = point
+                if previous:
+                    dx, dy = point[0] - previous[0], point[1] - previous[1]
+                    if max(abs(dx), abs(dy)) >= 8:
+                        if abs(dx) >= abs(dy):
+                            direction = "Right" if dx > 0 else "Left"
+                        else:
+                            direction = "Down" if dy > 0 else "Up"
+                        self.root.after(
+                            0,
+                            lambda value=direction: self.activate(
+                                "mouse-nav:" + value, lambda: self._move_nav(value)
+                            ),
+                        )
+            elif w_param == WM_LBUTTONDOWN and self.nav_selected:
+                self.root.after(0, self.nav_selected.invoke)
+                return 1
+            elif w_param == WM_LBUTTONUP and self.nav_selected:
+                return 1
+        return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
+
     def _handle_navigation_vk(self, vk: int) -> None:
         directions = {VK_LEFT: "Left", VK_RIGHT: "Right", VK_UP: "Up", VK_DOWN: "Down"}
         if vk in directions:
@@ -509,6 +569,24 @@ class FireflyKeyboard:
         for vk in (VK_RIGHT, VK_RETURN):
             event = KBDLLHOOKSTRUCT(vkCode=vk, scanCode=0, flags=0, time=0, dwExtraInfo=0)
             self._navigation_hook(HC_ACTION, WM_KEYDOWN, ctypes.addressof(event))
+
+    def _run_mouse_navigation_self_test(self) -> None:
+        """Exercise remote pointer-right + click through the real mouse hook."""
+        self.pointer_inside = True
+        first = next((button for button in self.nav_buttons if button.cget("text") == "q"), None)
+        if not first:
+            return
+        self._select_nav_button(first)
+        self.last_mouse_point = (100, 100)
+        move = MSLLHOOKSTRUCT(pt=POINT(130, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
+        self._mouse_navigation_hook(HC_ACTION, WM_MOUSEMOVE, ctypes.addressof(move))
+        click = MSLLHOOKSTRUCT(pt=POINT(130, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
+        self.root.after(
+            100,
+            lambda: self._mouse_navigation_hook(
+                HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click)
+            ),
+        )
 
     def activate(self, signature: str, action) -> None:
         now = time.perf_counter() * 1000
@@ -694,7 +772,17 @@ class FireflyKeyboard:
             user32.UnhookWindowsHookEx(self.hook)
         if self.nav_hook:
             user32.UnhookWindowsHookEx(self.nav_hook)
+        if self.mouse_hook:
+            user32.UnhookWindowsHookEx(self.mouse_hook)
         self.root.destroy()
+
+    def request_close(self) -> None:
+        now = time.monotonic()
+        if now < self.close_armed_until:
+            self.close()
+            return
+        self.close_armed_until = now + 2.5
+        self.guard_var.set("Close protected — press × again within 2.5 seconds")
 
     def run(self) -> None:
         if "--screenshot" in sys.argv:
@@ -709,6 +797,9 @@ class FireflyKeyboard:
         if "--nav-self-test" in sys.argv:
             self.root.after(650, self._run_navigation_self_test)
             self.root.after(2200, self.close)
+        if "--mouse-nav-self-test" in sys.argv:
+            self.root.after(650, self._run_mouse_navigation_self_test)
+            self.root.after(2400, self.close)
         self.root.mainloop()
 
 
@@ -717,3 +808,4 @@ if __name__ == "__main__":
     if "--replace-osk" in sys.argv:
         close_windows_osk()
     FireflyKeyboard().run()
+
