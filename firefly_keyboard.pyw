@@ -201,8 +201,12 @@ def close_existing_firefly() -> None:
     """Replace an older overlay instead of stacking multiple keyboards."""
     hwnd = user32.FindWindowW(None, APP_TITLE)
     if hwnd:
+        # The first close arms the accidental-close guard; the second confirms
+        # this deliberate same-app replacement.
         user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-        time.sleep(0.18)
+        time.sleep(0.36)
+        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+        time.sleep(0.12)
 
 
 class FireflyKeyboard:
@@ -808,4 +812,5 @@ if __name__ == "__main__":
     if "--replace-osk" in sys.argv:
         close_windows_osk()
     FireflyKeyboard().run()
+
 
