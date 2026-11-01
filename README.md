@@ -7,17 +7,17 @@ A native, remote-oriented Windows on-screen keyboard for a Fire TV/remote-deskto
 This program is operating inside an **Illinois AnyWare remote session**, possibly controlled only by a TV remote. **Avoid losing access to the university desktop.** The regular `Launch Firefly Keyboard.cmd` starts in safe pointer mode:
 
 - **Does not close Windows On-Screen Keyboard (OSK)**, even when an old launcher accidentally passes `--replace-osk`.
-- **Does not install system-wide keyboard or mouse hooks**, capture remote arrow/OK events, or block the mouse elsewhere.
+- **Does not install system-wide keyboard or mouse hooks** or block mouse/keyboard events elsewhere. The optional input inspector observes key state with a Tk timer; it cannot intercept the remote.
 - **Does not hide itself for one-shot mouse clicks**. The experimental `LEFT CLICK` / `RIGHT CLICK` conversion controls are deliberately unavailable in safe mode. Normal pointer clicks outside Firefly continue normally.
 - Never auto-terminates an existing Firefly instance. A repeat launch returns to the existing window.
 - Never forces foreground focus on pointer leave or to deliver text. Click the actual target text field first, then type.
-- Shows a `SAFE · POINTER` indicator. If D-pad-only input does not behave like a pointer, this safe default is intentionally less capable than hook mode. Do not enable advanced input unless another reliable recovery path exists.
+- Shows a `SAFE · POINTER` indicator. If D-pad-only input does not behave like a pointer, the optional `--advanced-input` mode can **observe** directional keys by polling, but cannot swallow their underlying Windows events.
 
 The **OSK** app shortcut starts Windows' built-in keyboard, independently of Firefly. The close (×) control requires two presses within 2.5 seconds to avoid accidental closure.
 
 Startup and Tk callback errors are appended to `%LOCALAPPDATA%\FireflyDeskKeyboard\startup.log`. Launch `Debug Firefly Keyboard.cmd` to display failures in a console without replacing OSK. An application can still crash; safe mode minimizes its effects on the rest of the remote session, not guarantees a crash-free Windows runtime.
 
-**Advanced features** (`--advanced-input` in a manually invoked command) install global input hooks for remote navigation and one-shot right-click conversion. They are intentionally **opt-in** and not recommended when Firefly is the only feasible input method. Microsoft's documentation warns that low-level input hooks can time out and be removed silently.
+**Crash regression fix:** Previous versions created Python `WINFUNCTYPE` callbacks for Windows low-level keyboard/mouse hooks; these could re-enter Tk and are suspected in the reported `PyEval_RestoreThread` fatal error. **Both callback creation and hook installation have been removed completely.** Advanced mode (`--advanced-input`) now uses non-intercepting `GetAsyncKeyState` polling from Tk's event loop. No remote event is stolen. The tradeoff is that very short presses can be missed, and a mouse left-click cannot safely be converted into a right-click without also reaching the underlying app.
 
 The Illinois AnyWare service may disconnect idle sessions after 15 minutes and log them off one hour after disconnection. Save critical work to a persistent university-supported location.
 
@@ -27,7 +27,7 @@ The Illinois AnyWare service may disconnect idle sessions after 15 minutes and l
 - `SHIFT` is one-shot uppercase; its selection survives redraw, and it cancels sticky Ctrl so that typing cannot unintentionally interrupt a terminal with Ctrl+C.
 - `TOP/BOTTOM`, `SIZE`, `123`, `PASTE`, and word suggestions are available without global hooks.
 - If typing reports **Click the destination field first**, click the destination text field outside Firefly to establish focus. Safe mode does not silently move focus or send text to an unrelated app.
-- The `INSPECT` hook-based diagnostic and D-pad interception are disabled in safe mode; they require `--advanced-input`.
+- `INSPECT` now works in safe mode without hooks: it samples native virtual-key press transitions. The client may still discard or translate remote buttons before they reach Windows. D-pad navigation by polling is opt-in; it cannot suppress original arrow-key actions in the target application.
 
 
 ## Quick launch
@@ -39,9 +39,9 @@ On shared/managed university desktops, installed apps and their permissions can 
 
 ## Click anywhere (advanced only)
 
-Native pointer clicks already work **outside** the Firefly overlay and do not need mouse hooks. Firefly's custom one-shot LEFT/RIGHT CLICK conversion behind the overlay is hidden in **safe mode** because it would otherwise intercept global remote input and briefly withdraw the keyboard.
+Native pointer clicks already work **outside** the Firefly overlay and do not need mouse hooks. Firefly's one-shot LEFT/RIGHT CLICK controls are hidden in **safe mode**. In advanced polling mode, keyboard Enter/Space can trigger an injected click at the pointer position while the overlay is hidden; a normal pointer left-click passes through unchanged and does **not** generate a second click. Right-click conversion of a left-click is therefore not available without event interception.
 
-If the Citrix touch client exposes gestures, Citrix documents touch-hold-release for right-click. That gesture may **not** be available through a physical Fire TV remote. Avoid enabling experimental hooks just to access right-click until a fallback input method exists.
+If the Citrix touch client exposes gestures, Citrix documents touch-hold-release for right-click. That gesture may **not** be available through a physical Fire TV remote. Avoid relying on experimental pointer-click conversion as your only way to operate AnyWare.
 
 
 ## Predictive text
@@ -52,7 +52,7 @@ Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\Firefly
 
 ## Input diagnostics
 
-Safe mode preserves the existing Windows/remote-desktop event path and does not inspect or swallow global mouse/keyboard events. When advanced mode is deliberately enabled, `INSPECT` can capture native `VK` / `SCAN` codes, but a Citrix/Fire TV client may already have transformed or discarded the original remote button identity.
+Safe mode preserves the Windows/remote-desktop event path and never consumes global mouse or keyboard events. `INSPECT` samples **virtual-key codes only** from the Tk event loop, without installing hooks. It cannot recover hardware scan codes or an event Citrix/Fire TV already transformed or discarded. Microsoft's `GetAsyncKeyState` API explicitly cautions that its recent-press bit is unreliable, so very brief taps may be missed.
 
 Text uses `SendInput` when Firefly's target is verified foreground, with targeted message fallback for compatible controls. A posted Win32 message does not prove a modern application accepted text. Always verify in the actual field, particularly in a terminal.
 
@@ -66,4 +66,4 @@ Text uses `SendInput` when Firefly's target is verified foreground, with targete
 
 ## Limits
 
-Only source-level review and basic sanity checks can be done without the actual interactive Windows/Fire TV session. Validate Shift → letter → Shift, Ctrl → Shift → C in a **non-destructive scratch editor**, launching CMD, and both one-shot click modes before relying on the revised program for critical work.
+Only source-level review and a Windows import CI smoke workflow (where available) can be done without the actual interactive Windows/Fire TV session. A passing import alone does not establish safety or absence of thread-state crashes. Validate Shift → letter → Shift, Ctrl → Shift → C in a **non-destructive scratch editor**, launching CMD, and both one-shot click modes before relying on the revised program for critical work.
