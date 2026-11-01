@@ -222,6 +222,17 @@ user32.GetClientRect.argtypes = (wintypes.HWND, ctypes.POINTER(RECT))
 user32.GetClientRect.restype = wintypes.BOOL
 user32.AttachThreadInput.argtypes = (wintypes.DWORD, wintypes.DWORD, wintypes.BOOL)
 user32.AttachThreadInput.restype = wintypes.BOOL
+user32.GetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int)
+user32.GetWindowLongW.restype = wintypes.LONG
+user32.SetWindowLongW.argtypes = (wintypes.HWND, ctypes.c_int, wintypes.LONG)
+user32.SetWindowLongW.restype = wintypes.LONG
+user32.SetWindowPos.argtypes = (wintypes.HWND, wintypes.HWND, ctypes.c_int,
+                                ctypes.c_int, ctypes.c_int, ctypes.c_int, wintypes.UINT)
+user32.SetWindowPos.restype = wintypes.BOOL
+user32.ShowWindow.argtypes = (wintypes.HWND, ctypes.c_int)
+user32.ShowWindow.restype = wintypes.BOOL
+user32.IsIconic.argtypes = (wintypes.HWND,)
+user32.IsIconic.restype = wintypes.BOOL
 
 
 def send_input(item: INPUT) -> bool:
