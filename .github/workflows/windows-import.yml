@@ -21,3 +21,4 @@ jobs:
         run: |
           python -m py_compile firefly_keyboard.pyw
           python -c "import runpy; runpy.run_path('firefly_keyboard.pyw', run_name='firefly_import_check')"
+          python -m unittest discover -s tests -v
