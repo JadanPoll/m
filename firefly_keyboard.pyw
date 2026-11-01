@@ -260,6 +260,33 @@ def send_mouse_click(right: bool = False) -> bool:
     return user32.SendInput(2, events, ctypes.sizeof(INPUT)) == 2
 
 
+def send_word_replacement(typed: str, suggestion: str) -> bool:
+    """Complete a prefix or correct a word in one ordered SendInput batch.
+
+    Completion merely appends its suffix; no destructive Backspace is needed.
+    Correction sends Backspace + replacement as one contiguous Windows batch,
+    only after _send_to_target has verified the foreground application.
+    """
+    if len(typed) > 64 or len(suggestion) > 64:
+        return False
+    is_completion = suggestion.casefold().startswith(typed.casefold())
+    backspaces = 0 if is_completion else len(typed)
+    replacement = (suggestion[len(typed):] if is_completion else suggestion) + " "
+    events: list[INPUT] = []
+    for _ in range(backspaces):
+        events.append(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_BACK, 0, 0, 0, 0)))
+        events.append(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(VK_BACK, 0, KEYEVENTF_KEYUP, 0, 0)))
+    raw = replacement.encode("utf-16-le")
+    for index in range(0, len(raw), 2):
+        unit = raw[index] | (raw[index + 1] << 8)
+        events.append(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, unit, KEYEVENTF_UNICODE, 0, 0)))
+        events.append(INPUT(type=INPUT_KEYBOARD, ki=KEYBDINPUT(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0)))
+    if not events:
+        return False
+    batch = (INPUT * len(events))(*events)
+    return user32.SendInput(len(events), batch, ctypes.sizeof(INPUT)) == len(events)
+
+
 def send_unicode(text: str) -> bool:
     sent = True
     for char in text:
@@ -730,13 +757,9 @@ class FireflyKeyboard:
         self.previous_word = learned
 
     def _update_suggestions(self) -> None:
-        """Small local backoff predictor: prefix > learned word pairs > word frequency.
-
-        Only offer corrections when completions do not dominate. Never
-        autocorrect silently: every prediction requires explicit selection.
-        """
-        prefix = self.current_word.lower()
-        common_rank = {word.lower(): index for index, word in enumerate(COMMON_WORDS)}
+        """Rank completions before corrections, using local contextual counts."""
+        prefix = self.current_word.casefold()
+        common_rank = {word.casefold(): index for index, word in enumerate(COMMON_WORDS)}
         context = self.next_words.get(self.previous_word, {})
         vocabulary = set(common_rank) | set(self.learned_words) | set(context)
 
@@ -745,32 +768,37 @@ class FireflyKeyboard:
                     common_rank.get(word, 99999), len(word), word)
 
         if prefix:
+            # A completion always beats a fuzzy correction, and we never offer
+            # the already-typed prefix as a redundant "suggestion".
             completions = sorted(
                 (word for word in vocabulary if word.startswith(prefix) and word != prefix),
                 key=rank,
             )
-            # A misspelling is less useful than a valid completion, and fuzzy
-            # guesses are dangerous for short command names in terminals.
-            corrections = []
-            if len(prefix) >= 3 and (len(completions) < 2):
-                corrections = difflib.get_close_matches(prefix, vocabulary, n=8, cutoff=0.65)
-                corrections = sorted(
-                    (word for word in corrections if word != prefix and word not in completions),
-                    key=lambda word: (
-                        -difflib.SequenceMatcher(None, prefix, word).ratio(),
-                        *rank(word),
-                    ),
-                )
-            choices = completions[:2] + corrections[:2] + [prefix] + completions[2:]
+            choices = completions[:3]
+            if len(choices) < 3 and len(prefix) >= 3:
+                # Bound fuzzy matching to plausible candidates so typing is
+                # responsive even if Windows has a large user dictionary.
+                candidates = [
+                    word for word in vocabulary
+                    if abs(len(word) - len(prefix)) <= 2 and
+                    word[:1] == prefix[:1] and word not in completions and word != prefix
+                ]
+                close = difflib.get_close_matches(prefix, candidates, n=6, cutoff=0.7)
+                close.sort(key=lambda word: (
+                    -difflib.SequenceMatcher(None, prefix, word).ratio(), *rank(word)
+                ))
+                choices.extend(close[:3 - len(choices)])
         else:
-            choices = sorted(context, key=rank) + [
-                word for word in ("the", "I", "you") if word.lower() not in context
-            ]
+            choices = sorted(context, key=rank)[:3]
+            if len(choices) < 3:
+                choices += [word for word in ("the", "I", "you") if word.casefold() not in
+                            {entry.casefold() for entry in choices}]
 
         unique = []
         for word in choices:
-            if word and word.lower() not in {item.lower() for item in unique}:
-                shown = word.capitalize() if self.current_word[:1].isupper() else word
+            if word and word.casefold() not in {entry.casefold() for entry in unique}:
+                shown = ("I" if word.casefold() == "i" else
+                         word.capitalize() if self.current_word[:1].isupper() else word)
                 unique.append(shown)
             if len(unique) == 3:
                 break
@@ -799,14 +827,12 @@ class FireflyKeyboard:
         suggestion = self.suggestions[index]
         typed = self.current_word
 
-        def replace(hwnd: int) -> None:
-            # Keep deletion and insertion on the same captured destination;
-            # a delayed second send could land in a different window.
-            for _ in typed:
-                direct_vk(hwnd, VK_BACK)
-            direct_text(hwnd, suggestion + " ")
-
-        self._send_to_target(lambda: False, replace)
+        if not self._send_to_target(
+            lambda: send_word_replacement(typed, suggestion), None
+        ):
+            # Do not clear the prefix or "learn" a word the target never got.
+            self.guard_var.set("Suggestion not sent — click the target field")
+            return
         self._learn_word(suggestion)
         self.current_word = ""
         self._update_suggestions()
