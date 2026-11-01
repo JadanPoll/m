@@ -46,11 +46,21 @@ The remote's measured OK/Select signal is also guarded once at the Firefly-windo
 
 ## D-pad snap navigation
 
-The remote desktop converts D-pad taps into accelerated pointer motion instead of `VK_LEFT/RIGHT/UP/DOWN`. While the pointer is over Firefly, strongly horizontal or vertical motion is therefore treated as one neighboring-key step and the pointer is snapped to that key's center. A **160 ms** step guard plus a **240 ms quiet-period lock** keeps every follow-on event from the same accelerated tap pinned to that center, so the physical OK click cannot drift back to another key. Once the burst goes quiet, normal mouse hover immediately highlights the control underneath. Diagonal mouse motion is left alone, and capture/inspector mode remains observation-only except for hover highlighting.
+The remote desktop converts D-pad taps into accelerated pointer motion instead of `VK_LEFT/RIGHT/UP/DOWN`. A real Firefly capture showed long same-axis streams such as `+8, +103, +4, +41, +2, +8`, not one tidy motion event. While the pointer is over Firefly, Firefly now keeps the pointer pinned to the selected key throughout a **650 ms rolling stream lock**. Same-direction holds repeat at a controlled **520 ms** rate, while an opposite or perpendicular direction responds immediately. A widget's ordinary mouse-enter event is forbidden from stealing an active snap. Once the stream ends, normal mouse hover takes over.
+
+The selected or hovered control uses a complete **lime fill**, not only Tk's thin focus border, so the state remains visible through remote-desktop scaling and transparency.
+
+## Local prediction intelligence
+
+Firefly combines a local 9,000-word frequency corpus, Windows' personal spelling dictionary, and words/bigrams typed through Firefly. GPT-2's vocabulary file alone would only provide subword tokens; its contextual intelligence lives in hundreds of megabytes of model weights and is not appropriate for a lightweight managed-desktop OSK. Firefly instead applies the useful small-device equivalent: logarithmically weighted corpus, personal, and previous-word evidence with no network request.
+
+Remote duplication can create garbage fragments, so a previously unseen personal word must be observed at least twice before it becomes a suggestion. A single accidental bigram no longer outranks the frequency corpus. The observations remain local in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json`.
 
 ## Map a TV remote
 
 Run `python firefly_keyboard.pyw --capture-remote`. The red **REMOTE CAPTURE** row reports key DOWN/UP transitions as virtual-key numbers and names, plus pointer deltas when a remote button is translated into mouse movement. Move the pointer above/outside Firefly, then press each remote button once; clicking a Firefly key intentionally creates output that is annotated as likely application output rather than raw remote input. The observation-only session is appended locally to `%LOCALAPPDATA%\FireflyDeskKeyboard\remote-input-capture.log`; it installs no hooks, swallows no input, and sends nothing over the network. Very short client-side events can still be discarded before Windows exposes them.
+
+Normal runs also maintain a bounded `%LOCALAPPDATA%\FireflyDeskKeyboard\navigation-trace.log` (maximum 256 KiB) so failures can be replayed instead of guessed at later. It records relative motion, navigation decisions, direction, duplicate-OK decisions, and a numeric control position. It deliberately records no typed letters/words, window titles, or absolute desktop coordinates, and nothing is uploaded.
 
 ## Remote interaction
 
@@ -77,6 +87,7 @@ Open the **MOUSE** menu in Firefly's title row. These functions are available in
 **Drag between two desktop positions:** Press `DRAG FROM • 4.5s`, move the pointer to the drag start, and allow the countdown to capture it. Next press `DRAG TO • 4.5s`, move the pointer to the destination, and allow that countdown to capture the endpoint. Firefly inserts mouse-down, several moves and mouse-up in **one bounded SendInput batch**. It never intentionally keeps a button held between actions or while you move the TV remote. `CANCEL / CLEAR` discards a pending capture and its start position.
 
 Because the drag is a short synthesized sequence and not a physically held mouse button, some applications (including Citrix-hosted ones) may not recognize every drag. Windows may also deny input to elevated or secure surfaces, and a successful SendInput call does not prove the application acted. **Try a harmless file selection or text selection before relying on it for any consequential operation.** The regular OSK and Citrix input path remain available if Firefly exits.
+
 
 
 
