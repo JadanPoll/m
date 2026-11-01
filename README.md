@@ -33,7 +33,7 @@ Choose `LEFT CLICK` or `RIGHT CLICK` in the APPS / DESKTOP strip. The keyboard t
 
 The three WORDS keys offer word completions and explicit spelling suggestions. Predictions now rank candidates using the preceding word (locally learned bigrams), individual learned word frequency, and the small built-in common-words list, with local spelling-dictionary additions. **Suggestions are never auto-inserted.** Selecting one replaces the current word and appends a space.
 
-Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json` when Firefly closes normally. No cloud service is used. **Do not type secrets through the keyboard unless you accept that its local learning model can record the typed words.** The current model is intentionally lightweight; for larger vocabulary and typo correction, see [SymSpellPy](https://github.com/mammothb/symspellpy) and [Presage](https://github.com/presage/presage) as research directions, not installed dependencies.
+Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json` when Firefly closes normally. No cloud service is used. **Do not type secrets through the keyboard unless you accept that its local learning model can record the typed words.** The current model is intentionally lightweight; for larger vocabulary and typo correction, see [SymSpellPy](https://github.com/mammothb/symspellpy) and [Presage](https://presage.sourceforge.io/) as research directions, not installed dependencies.
 
 ## Input diagnostics
 
