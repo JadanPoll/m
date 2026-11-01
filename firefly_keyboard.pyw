@@ -523,12 +523,14 @@ class FireflyKeyboard:
                 ("NOTEPAD", lambda: self._launch_app("notepad")),
                 ("CHROME", lambda: self._launch_app("chrome")),
                 ("RUN", lambda: self._launch_app("run")),
-            ]),
-            ("DESKTOP", [
-                ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
-                ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
+                ("OSK", lambda: self._launch_app("osk")),
             ]),
         ]
+        if not self.safe_mode:
+            shortcut_rows.append(("DESKTOP", [
+                ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
+                ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
+            ]))
         for title, shortcuts in shortcut_rows:
             quick = tk.Frame(self.root, bg=BG, padx=12, pady=2)
             quick.pack(fill="x")
@@ -565,7 +567,7 @@ class FireflyKeyboard:
         self._update_suggestions()
 
         if self.safe_mode:
-            self.inspect_var.set("SAFE MODE: no global hooks · normal pointer clicks · Windows OSK preserved")
+            self.inspect_var.set("SAFE POINTER MODE: no global hooks · Windows OSK available · remote D-pad interception off")
         self.keyboard = tk.Frame(self.root, bg=BG, padx=10, pady=9)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
@@ -600,6 +602,7 @@ class FireflyKeyboard:
             "powershell": ["powershell.exe", "-NoLogo"],
             "explorer": ["explorer.exe"],
             "notepad": ["notepad.exe"],
+            "osk": ["osk.exe"],
         }
         if name == "run":
             self.guard_var.set("Windows Run opened" if show_run_dialog()
