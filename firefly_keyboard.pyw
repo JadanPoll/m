@@ -1216,9 +1216,9 @@ class FireflyKeyboard:
             self.ctrl_held = not self.ctrl_held
             self._build_keys()
         elif action == "BACK":
-            self._send_vk_action(VK_BACK)
-            self.current_word = self.current_word[:-1]
-            self._update_suggestions()
+            if self._send_vk_action(VK_BACK):
+                self.current_word = self.current_word[:-1]
+                self._update_suggestions()
         elif action == "PASTE":
             self.ctrl_held = False
             clipboard_text = read_clipboard_text()
@@ -1227,18 +1227,18 @@ class FireflyKeyboard:
             else:
                 # Text injection is reliable in remote/RDP targets where a
                 # synthetic Ctrl+V may be swallowed before reaching the editor.
-                self._send_to_target(
-                    lambda: False,
+                if self._send_to_target(
+                    lambda: send_unicode(clipboard_text),
                     lambda hwnd, value=clipboard_text: direct_text(hwnd, value),
-                )
-                self._track_text(clipboard_text)
+                ):
+                    self._track_text(clipboard_text)
             self._build_keys()
         elif isinstance(action, int):
             self._send_vk_action(action)
         elif isinstance(action, str) and action.startswith("VK:"):
             vk = int(action.split(":", 1)[1])
-            self._send_vk_action(vk)
-            if vk in (VK_RETURN, VK_TAB, VK_ESCAPE):
+            delivered = self._send_vk_action(vk)
+            if delivered and vk in (VK_RETURN, VK_TAB, VK_ESCAPE):
                 if self.current_word:
                     self._learn_word(self.current_word)
                 self.current_word = ""
@@ -1255,23 +1255,25 @@ class FireflyKeyboard:
                 self.ctrl_held = False
                 reset_layout = True
             else:
-                self._send_to_target(lambda: send_unicode(text), lambda hwnd: direct_text(hwnd, text))
-                self._track_text(text)
+                if self._send_to_target(
+                    lambda: send_unicode(text), lambda hwnd: direct_text(hwnd, text)
+                ):
+                    self._track_text(text)
             if self.shifted:
                 self.shifted = False
             if reset_layout:
                 self._build_keys()
 
-    def _send_vk_action(self, vk: int) -> None:
+    def _send_vk_action(self, vk: int) -> bool:
         if self.ctrl_held:
-            self._send_to_target(
+            sent = self._send_to_target(
                 lambda: send_ctrl_chord(vk),
                 lambda hwnd: direct_ctrl_chord(hwnd, vk),
             )
             self.ctrl_held = False
             self._build_keys()
-        else:
-            self._send_to_target(lambda: send_vk(vk), lambda hwnd: direct_vk(hwnd, vk))
+            return sent
+        return self._send_to_target(lambda: send_vk(vk), lambda hwnd: direct_vk(hwnd, vk))
 
     def _focused_control(self, target: int) -> int:
         thread_id = user32.GetWindowThreadProcessId(target, None)
@@ -1355,6 +1357,12 @@ class FireflyKeyboard:
             user32.GetWindowTextW(hwnd, title, 256)
             foreground_title = title.value.strip()
             if hwnd != own_hwnd and foreground_title not in (APP_TITLE, "On-Screen Keyboard", "Magnifier"):
+                if hwnd != self.last_external_hwnd:
+                    # Prediction only reflects text typed through Firefly in
+                    # one destination. A new app must not inherit that prefix.
+                    self.current_word = ""
+                    self.previous_word = ""
+                    self._update_suggestions()
                 self.last_external_hwnd = hwnd
         title = ctypes.create_unicode_buffer(256)
         user32.GetWindowTextW(self.last_external_hwnd, title, 256)
