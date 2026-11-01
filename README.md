@@ -6,7 +6,7 @@ A native, remote-oriented Windows on-screen keyboard for a Fire TV/remote-deskto
 
 Double-click `Launch Firefly Keyboard.cmd`. It closes the legacy Windows On-Screen Keyboard window so that the two keyboards do not overlap, **without disabling or uninstalling Windows OSK**. You can reopen OSK normally if Firefly cannot receive input.
 
-The close (×) control requires a second press within 2.5 seconds, preventing a remote pointer mistake from immediately shutting down the keyboard. Startup and callback errors are recorded to **`%LOCALAPPDATA%\\FireflyDeskKeyboard\\startup.log`** every launch, including the no-console `pythonw` launcher. If it seems to vanish, first check whether it only became transparent (now fixed) or was temporarily hidden by one-shot click mode. If it truly exits, inspect that log. Run `Debug Firefly Keyboard.cmd` for a visible troubleshooting console, without replacing Windows OSK.
+The close (×) control requires a second press within 2.5 seconds, preventing a remote pointer mistake from immediately shutting down the keyboard. A Windows single-instance mutex prevents repeated remote launcher activations from closing each other; a second launcher invocation leaves the existing keyboard running. Startup and callback errors are appended to **`%LOCALAPPDATA%\\FireflyDeskKeyboard\\startup.log`**, including under the no-console `pythonw` launcher. If it seems to vanish, check whether it is in one-shot click mode or inspect the log. Run `Debug Firefly Keyboard.cmd` for a visible Python traceback, without replacing Windows OSK. The regular launcher delays OSK replacement until Firefly has remained open for ten seconds.
 
 ## Remote interaction
 
@@ -26,7 +26,7 @@ Use the **APPS / DESKTOP** strip: `CMD`, `POWERSHELL`, `FILES` (Explorer), `NOTE
 
 Choose `LEFT CLICK` or `RIGHT CLICK` in the APPS / DESKTOP strip. The keyboard temporarily hides. Move the remote pointer to the desired location and click/OK **once**. Firefly converts that event into one left or right click, then restores itself.
 
-- ESC cancels the armed click. If no click arrives, Firefly restores itself automatically after 20 seconds.
+- ESC cancels the armed click. If no click arrives, Firefly restores itself automatically after 10 seconds. The activation press is briefly ignored so it cannot accidentally click through to the desktop.
 - The right-click mode converts the next physical left click or OK/Enter into a right click. It does **not** permanently remap the remote.
 - Click injection needs an unlocked, interactive Windows desktop and is limited by Windows integrity/security boundaries. It cannot operate on UAC/secure login screens.
 
