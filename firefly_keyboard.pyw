@@ -343,15 +343,8 @@ def direct_ctrl_chord(hwnd: int, vk: int) -> None:
     user32.PostMessageW(hwnd, WM_KEYUP, VK_CONTROL, 0xC0000001)
 
 
-def close_windows_osk() -> None:
-    """Politely close only the legacy Windows OSK window when replacing it."""
-    hwnd = user32.FindWindowW(None, "On-Screen Keyboard")
-    if hwnd:
-        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-
-
 def claim_single_instance() -> int | None:
-    """Ensure that rapid repeated remote launches cannot replace each other."""
+    """Prevent duplicate remote launches from replacing each other."""
     handle = kernel32.CreateMutexW(None, False, "Local\\FireflyDeskKeyboard")
     if not handle:
         raise ctypes.WinError()
@@ -359,18 +352,6 @@ def claim_single_instance() -> int | None:
         kernel32.CloseHandle(handle)
         return None
     return handle
-
-
-def close_existing_firefly() -> None:
-    """Only replace a pre-mutex legacy overlay after claiming the singleton."""
-    hwnd = user32.FindWindowW(None, APP_TITLE)
-    if hwnd:
-        # The first close arms the accidental-close guard; the second confirms
-        # this deliberate same-app replacement.
-        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-        time.sleep(0.36)
-        user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-        time.sleep(0.12)
 
 
 class FireflyKeyboard:
