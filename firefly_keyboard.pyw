@@ -9,6 +9,7 @@ from ctypes import wintypes
 import difflib
 import json
 import os
+import subprocess
 import struct
 import sys
 import time
@@ -89,6 +90,11 @@ WM_MOUSEMOVE = 0x0200
 WM_LBUTTONDOWN = 0x0201
 WM_LBUTTONUP = 0x0202
 WM_LBUTTONDBLCLK = 0x0203
+LLMHF_INJECTED = 0x00000001
+MOUSEEVENTF_LEFTDOWN = 0x0002
+MOUSEEVENTF_LEFTUP = 0x0004
+MOUSEEVENTF_RIGHTDOWN = 0x0008
+MOUSEEVENTF_RIGHTUP = 0x0010
 WM_CHAR = 0x0102
 WM_PASTE = 0x0302
 WM_CLOSE = 0x0010
@@ -188,6 +194,17 @@ kernel32.GlobalUnlock.restype = wintypes.BOOL
 
 def send_input(item: INPUT) -> bool:
     return user32.SendInput(1, ctypes.byref(item), ctypes.sizeof(INPUT)) == 1
+
+
+def send_mouse_click(right: bool = False) -> bool:
+    """Deliver a single mouse click using the supported Win32 SendInput API."""
+    down = MOUSEEVENTF_RIGHTDOWN if right else MOUSEEVENTF_LEFTDOWN
+    up = MOUSEEVENTF_RIGHTUP if right else MOUSEEVENTF_LEFTUP
+    events = (INPUT * 2)(
+        INPUT(type=0, mi=MOUSEINPUT(0, 0, 0, down, 0, 0)),
+        INPUT(type=0, mi=MOUSEINPUT(0, 0, 0, up, 0, 0)),
+    )
+    return user32.SendInput(2, events, ctypes.sizeof(INPUT)) == 2
 
 
 def send_unicode(text: str) -> bool:
@@ -301,6 +318,7 @@ class FireflyKeyboard:
         self.preview_idle = "--idle-preview" in sys.argv
         self.pointer_inside = False
         self.header_buttons: list[tk.Button] = []
+        self.quick_buttons: list[tk.Button] = []
         self.suggestion_buttons: list[tk.Button] = []
         self.suggestions: list[str] = []
         self.current_word = ""
@@ -322,6 +340,10 @@ class FireflyKeyboard:
         self.last_mouse_motion_at = 0.0
         self.last_nav_action = ("", 0.0)
         self.remote_nav_until = 0.0
+        self.pointer_mode: str | None = None
+        self.pointer_suppress_up = False
+        self.pointer_suppress_until = 0.0
+        self.pointer_suppress_key: int | None = None
         self.close_armed_until = 0.0
         self.event_rows: list[str] = []
         self.last_native_at = 0
@@ -372,6 +394,7 @@ class FireflyKeyboard:
         for child in self.root.winfo_children():
             child.destroy()
         self.header_buttons = []
+        self.quick_buttons = []
         self.suggestion_buttons = []
         self.nav_buttons = []
         self.nav_selected = None
@@ -395,6 +418,29 @@ class FireflyKeyboard:
         tk.Label(status, textvariable=self.inspect_var, fg=CYAN, bg=PANEL,
                  anchor="e", font=("Segoe UI", 9)).pack(side="right")
 
+        quick = tk.Frame(self.root, bg=BG, padx=12, pady=3)
+        quick.pack(fill="x")
+        tk.Label(quick, text="APPS / DESKTOP", fg=CYAN, bg=BG,
+                 font=("Segoe UI", 9, "bold")).pack(side="left", padx=(0, 8))
+        shortcuts = [
+            ("CMD", lambda: self._launch_app("cmd")),
+            ("POWERSHELL", lambda: self._launch_app("powershell")),
+            ("FILES", lambda: self._launch_app("explorer")),
+            ("NOTEPAD", lambda: self._launch_app("notepad")),
+            ("LEFT CLICK", lambda: self._arm_desktop_click("left")),
+            ("RIGHT CLICK", lambda: self._arm_desktop_click("right")),
+        ]
+        for label, command in shortcuts:
+            button = tk.Button(
+                quick, text=label,
+                command=lambda name=label, callback=command: self.activate("quick:" + name, callback),
+                bg=KEY_ALT, fg=INK, activebackground=LIME, activeforeground=BG,
+                relief="flat", bd=0, padx=5, pady=4, font=("Segoe UI", 9, "bold"), takefocus=0,
+            )
+            self.quick_buttons.append(button)
+            self._register_nav_button(button, "quick:" + label)
+            button.pack(side="left", expand=True, fill="x", padx=3)
+
         suggest = tk.Frame(self.root, bg=BG, padx=12, pady=5)
         suggest.pack(fill="x")
         tk.Label(suggest, text="WORDS", fg=CYAN, bg=BG,
@@ -417,6 +463,52 @@ class FireflyKeyboard:
         self.keyboard = tk.Frame(self.root, bg=BG, padx=10, pady=9)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
+
+    def _launch_app(self, name: str) -> None:
+        """Launch only the explicitly listed programs, never a user-supplied command."""
+        commands = {
+            "cmd": ["cmd.exe"],
+            "powershell": ["powershell.exe", "-NoLogo"],
+            "explorer": ["explorer.exe"],
+            "notepad": ["notepad.exe"],
+        }
+        if name not in commands:
+            return
+        self.ctrl_held = False
+        self.shifted = False
+        try:
+            flags = subprocess.CREATE_NEW_CONSOLE if name in ("cmd", "powershell") else 0
+            subprocess.Popen(commands[name], creationflags=flags, cwd=os.path.expanduser("~"))
+            self.guard_var.set("Opened " + name + " — click a field to type")
+        except (OSError, ValueError) as error:
+            self.guard_var.set("Could not open " + name + ": " + str(error)[:90])
+        self._build_keys()
+
+    def _arm_desktop_click(self, side: str) -> None:
+        """Hide the overlay for one click anywhere, including beneath Firefly."""
+        self.pointer_mode = side
+        self.pointer_suppress_key = None
+        self.root.withdraw()
+        self.guard_var.set(side.upper() + " click armed — click/OK anywhere; ESC cancels")
+        self.root.after(20000, self._cancel_pointer_click_if_pending)
+
+    def _cancel_pointer_click_if_pending(self) -> None:
+        if self.pointer_mode is not None:
+            self.pointer_mode = None
+            self._restore_after_click("Desktop click timed out — keyboard restored")
+
+    def _restore_after_click(self, message: str) -> None:
+        self.root.deiconify()
+        self._apply_no_activate()
+        self.guard_var.set(message)
+
+    def _complete_desktop_click(self, side: str, point: tuple[int, int]) -> None:
+        # Position is the physical remote event point, not a stale Tk selection.
+        user32.SetCursorPos(*point)
+        success = send_mouse_click(right=side == "right")
+        self._restore_after_click(
+            side.upper() + " click sent" if success else "Click failed (Windows input permission)"
+        )
 
     def _tool_button(self, parent, text, command, color, width):
         button = tk.Button(parent, text=text, command=lambda: self.activate("tool:" + text, command),
@@ -573,7 +665,7 @@ class FireflyKeyboard:
         selected_id = getattr(self.nav_selected, "_firefly_identity", None)
         for child in self.keyboard.winfo_children():
             child.destroy()
-        self.nav_buttons = list(self.header_buttons) + list(self.suggestion_buttons)
+        self.nav_buttons = list(self.header_buttons) + list(self.quick_buttons) + list(self.suggestion_buttons)
         self.nav_selected = None
         font_size = max(13, int(19 * self.scale))
         # One text line keeps all four key rows plus navigation visible in the
@@ -794,10 +886,29 @@ class FireflyKeyboard:
             )
 
     def _mouse_navigation_hook(self, n_code, w_param, l_param):
-        """Translate remote-generated pointer motion into keyboard navigation."""
-        if n_code == HC_ACTION and self.pointer_inside:
+        """Capture one desktop click, or navigate Firefly while the pointer is inside."""
+        if n_code == HC_ACTION:
             data = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
+            # Injected clicks must always reach Windows, never be reinterpreted.
+            if data.flags & LLMHF_INJECTED:
+                return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
+            if self.pointer_suppress_up and w_param == WM_LBUTTONUP:
+                self.pointer_suppress_up = False
+                return 1
+            if time.monotonic() < self.pointer_suppress_until and w_param in (
+                WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP
+            ):
+                return 1
             point = (int(data.pt.x), int(data.pt.y))
+            if self.pointer_mode is not None and w_param in (WM_LBUTTONDOWN, WM_LBUTTONDBLCLK):
+                side = self.pointer_mode
+                self.pointer_mode = None
+                self.pointer_suppress_up = True
+                self.pointer_suppress_until = time.monotonic() + 0.25
+                self.root.after(0, lambda which=side, at=point: self._complete_desktop_click(which, at))
+                return 1
+            if not self.pointer_inside:
+                return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
             if w_param == WM_MOUSEMOVE:
                 previous = self.last_mouse_point
                 self.last_mouse_point = point
@@ -837,8 +948,26 @@ class FireflyKeyboard:
             self.nav_selected.invoke()
 
     def _navigation_hook(self, n_code, w_param, l_param):
-        if n_code == HC_ACTION and self.pointer_inside:
+        if n_code == HC_ACTION:
             data = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            if not (data.flags & LLKHF_INJECTED):
+                if self.pointer_suppress_key == data.vkCode and w_param in (WM_KEYUP, WM_SYSKEYUP):
+                    self.pointer_suppress_key = None
+                    return 1
+                if self.pointer_mode is not None and data.vkCode in (VK_RETURN, VK_SPACE, VK_ESCAPE):
+                    if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
+                        self.pointer_suppress_key = data.vkCode
+                        if data.vkCode == VK_ESCAPE:
+                            self.pointer_mode = None
+                            self.root.after(0, lambda: self._restore_after_click("Desktop click cancelled"))
+                        else:
+                            side = self.pointer_mode
+                            self.pointer_mode = None
+                            point = self.root.winfo_pointerxy()
+                            self.root.after(0, lambda which=side, at=point: self._complete_desktop_click(which, at))
+                    return 1
+            if not self.pointer_inside:
+                return user32.CallNextHookEx(self.nav_hook or 0, n_code, w_param, l_param)
             navigation_keys = (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_RETURN, VK_SPACE)
             # Never consume Firefly's own injected key events. This allows the
             # on-screen arrow/Enter buttons to reach the target application.
