@@ -636,7 +636,8 @@ class FireflyKeyboard:
             self.guard_var.set("Opened " + name + " — click a field to type")
         except (OSError, ValueError) as error:
             self.guard_var.set("Could not open " + name + ": " + str(error)[:90])
-        self._build_keys()
+        if not self.collapsed:
+            self._build_keys()
 
     def _arm_desktop_click(self, side: str) -> None:
         """Advanced-only click interception; never hide Firefly in safe mode."""
@@ -863,6 +864,8 @@ class FireflyKeyboard:
         ]
 
     def _build_keys(self) -> None:
+        self.letter_buttons = {}
+        self.shift_button = None
         # Rebuilding buttons must never redirect a remote OK press to another
         # control (notably CLOSE). Keep the selected action, not widget identity.
         selected_id = getattr(self.nav_selected, "_firefly_identity", None)
@@ -903,6 +906,10 @@ class FireflyKeyboard:
                                    height=key_height, font=("Segoe UI", font_size, "bold"), takefocus=0)
                 key_id = "key:" + (action.lower() if len(action) == 1 and action.isalpha() else action)
                 self._register_nav_button(button, key_id)
+                if action == "SHIFT":
+                    self.shift_button = button
+                elif len(action) == 1 and action.isalpha():
+                    self.letter_buttons[action.lower()] = button
                 button.grid(row=0, column=col, sticky="nsew", padx=2)
             frame.grid_rowconfigure(0, weight=1)
 
@@ -933,6 +940,17 @@ class FireflyKeyboard:
             self._select_nav_button(restored)
         elif self.pointer_inside and time.monotonic() >= self.remote_nav_until:
             self.root.after_idle(self._select_pointer_button)
+
+    def _refresh_shift_keys(self) -> None:
+        """One-shot Shift changes text in place: no destructive Tk rebuild."""
+        for letter, button in self.letter_buttons.items():
+            if button.winfo_exists():
+                button.configure(text=letter.upper() if self.shifted else letter)
+        if self.shift_button is not None and self.shift_button.winfo_exists():
+            self.shift_button.configure(
+                bg=LIME if self.shifted else KEY_ALT,
+                fg=BG if self.shifted else CYAN,
+            )
 
     def _select_nav_button(self, button: tk.Button) -> None:
         if self.nav_selected and self.nav_selected.winfo_exists():
@@ -1214,11 +1232,13 @@ class FireflyKeyboard:
 
     def key_action(self, action) -> None:
         if action == "SHIFT":
-            # Never leave a latent Ctrl chord that could send Ctrl+C/Ctrl+D
-            # to cmd/PowerShell when the user intended uppercase letters.
-            self.ctrl_held = False
+            # One-shot capitalization. Avoid destroying the widget whose Tk
+            # callback is currently running (which previously disrupted focus).
+            if self.ctrl_held:
+                self.ctrl_held = False
+                self._build_keys()  # update the CTRL indicator on this rare path
             self.shifted = not self.shifted
-            self._build_keys()
+            self._refresh_shift_keys()
         elif action == "MODE":
             self.symbols = not self.symbols
             self.shifted = False
@@ -1274,7 +1294,7 @@ class FireflyKeyboard:
             if self.shifted:
                 self.shifted = False
             if reset_layout:
-                self._build_keys()
+                self._refresh_shift_keys()
 
     def _send_vk_action(self, vk: int) -> bool:
         if self.ctrl_held:
