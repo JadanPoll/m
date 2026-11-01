@@ -52,9 +52,16 @@ The selected or hovered control uses a complete **lime fill**, not only Tk's thi
 
 ## Local prediction intelligence
 
-Firefly combines a local 9,000-word frequency corpus, Windows' personal spelling dictionary, and words/bigrams typed through Firefly. GPT-2's vocabulary file alone would only provide subword tokens; its contextual intelligence lives in hundreds of megabytes of model weights and is not appropriate for a lightweight managed-desktop OSK. Firefly instead applies the useful small-device equivalent: logarithmically weighted corpus, personal, and previous-word evidence with no network request.
+Firefly now ships **two complementary offline prediction tiers**:
 
-Remote duplication can create garbage fragments, so a previously unseen personal word must be observed at least twice before it becomes a suggestion. A single accidental bigram no longer outranks the frequency corpus. The observations remain local in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json`.
+1. **Existing tier (preserved):** the 9,000-word OpenSubtitles frequency dictionary, personal spelling dictionary, prefix completion/fuzzy correction, and locally learned words and previous-word pairs.
+2. **Static contextual tier (new):** `data/en_context_bigrams.tsv` contains about 4,500 previous-word contexts from the Leipzig Corpora Collection (see `data/ATTRIBUTION.md`). For example, after typing `you `, the next-word bar can now suggest `can`, `are`, or `have` without needing personal training. With a prefix, only matching candidate words enter the existing ranker.
+
+The new table is about 127 KB in plain text, loads once, requires **no inference engine, network connection, extra package, or administrator privileges**, and preserves the previous predictor if `firefly_prediction.py` or the table is missing. It stores **pruned conditional rankings** based on frequency counts, not GPT-2-generated scores or a complete probability distribution. It does not yet implement two-word (trigram) contexts, class-based generalization, or arbitrary phrase completions; those need separate evidence that they improve real typing.
+
+The original safeguards remain: an unseen personal word must be observed at least twice to become a prediction, a single accidental bigram does not dominate, and predictions are suggestions **only**—never inserted automatically. Local observations stay in `%LOCALAPPDATA%\\FireflyDeskKeyboard\\language.json`. The last-word prediction context is reset after sentence boundaries or Firefly-driven cursor/focus changes, since continuing from a stale cursor can modify the wrong text. External edits in a target application still cannot be detected reliably.
+
+The bundled asset is adapted from the independently maintained [OnitKeyboard predictive-bigrams dataset](https://github.com/synth-inc/predictive-bigrams), itself derived from the Leipzig corpus with CC BY 4.0 attribution. The pinned, standard-library-only reproduction script is `tools/build_static_context.py`. Portable checks: `python -m unittest discover -s tests -p test_static_prediction.py`. Windows/Tk behavioral tests remain separate.
 
 ## Map a TV remote
 
