@@ -204,6 +204,37 @@ class FireflyLogicTests(unittest.TestCase):
         self.assertTrue(any(w.startswith("comp") and w != "comp"
                             for w in keyboard.suggestions))
 
+    def test_static_context_suggestions_extend_existing_ranker(self):
+        # Preserve the old personal/noisy-word safeguards while adding a
+        # separate general-language prior, without a large runtime model.
+        static = ns["StaticNextWords"]
+        self.assertIsNotNone(static)
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.corpus_counts = {"can": 1000, "are": 1000, "the": 1000000}
+        keyboard.completion_index = {}
+        keyboard.words_by_first = {}
+        keyboard.learned_words = {}
+        keyboard.next_words = {}
+        keyboard.current_word = ""
+        keyboard.previous_word = "you"
+        keyboard.static_next_words = static({"you": (("can", 100), ("are", 20))})
+        keyboard.suggestion_buttons = []
+        keyboard._update_suggestions()
+        self.assertEqual(keyboard.suggestions[:2], ["can", "are"])
+        self.assertNotIn("the", keyboard.suggestions[:2])
+
+    def test_sentence_end_drops_static_context_but_space_preserves_it(self):
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.current_word = ""
+        keyboard.previous_word = ""
+        keyboard.learned_words = {}
+        keyboard.next_words = {}
+        keyboard._update_suggestions = lambda: None
+        keyboard._track_text("you ")
+        self.assertEqual(keyboard.previous_word, "you")
+        keyboard._track_text("can.")
+        self.assertEqual(keyboard.previous_word, "")
+
     def test_single_noisy_fragment_is_not_promoted_to_suggestion(self):
         keyboard = Firefly.__new__(Firefly)
         keyboard.corpus_counts = {"cat": 1000, "car": 500}
