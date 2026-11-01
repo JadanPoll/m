@@ -1,2 +1,3 @@
 @echo off
-start "" pythonw "%~dp0firefly_keyboard.pyw" --replace-osk
+rem SAFE DEFAULT: do not replace Windows On-Screen Keyboard or enable input hooks.
+start "" pythonw "%~dp0firefly_keyboard.pyw"
