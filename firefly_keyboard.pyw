@@ -855,6 +855,9 @@ class FireflyKeyboard:
                                      abs(point[1] - start[1]) < 12):
                     self.guard_var.set("Drag cancelled: two distinct points required")
                     return
+                if self._point_over_keyboard(start):
+                    self.guard_var.set("Drag cancelled: start now lies under Firefly; move the dock")
+                    return
                 if not send_mouse_drag(start, point):
                     self.guard_var.set("Drag blocked or not accepted by Windows")
                 else:
