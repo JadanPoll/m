@@ -34,7 +34,15 @@ LIME = "#b7f34a"
 RED = "#ff6e78"
 ALPHA_IDLE = 0.24  # Pointer leaves -> translucent, but not click-through.
 ALPHA_ACTIVE = 0.88
-MAX_DOCK_FRACTION = 0.34  # Never obscure half the AnyWare desktop.
+MAX_DOCK_FRACTION = 0.46  # Comfortable keys without monopolizing the screen.
+DEFAULT_DOCK_FRACTION = 0.43
+MOVE_STEP_PX = 72
+
+
+def clamp_dock_top(requested: int, work_top: int, work_bottom: int, outer_height: int) -> int:
+    """Keep the entire movable keyboard visible inside the remote desktop."""
+    return max(work_top, min(requested, max(work_top, work_bottom - outer_height)))
+
 
 COMMON_WORDS = tuple("""
 the to and a of in is it you that for on with this I be are as have at or
@@ -393,6 +401,8 @@ class FireflyKeyboard:
         self.screen_h = self.root.winfo_screenheight()
         self.scale = 0.82
         self.dock_top = False
+        self.dock_y: int | None = None  # None means dock to top/bottom; else free placement.
+        self._last_dock_top = 0
         self.collapsed = False
         self.show_apps = False
         self.shifted = False
@@ -469,10 +479,11 @@ class FireflyKeyboard:
         self._fit_window_to_content()
 
     def _fit_window_to_content(self) -> None:
-        """Fit within 34% of the AnyWare work area; never oversize to fit text.
+        """Use comfortable key height but stay below half of the work area.
 
-        If the user needs something behind the dock, COLLAPSE leaves a thin
-        reopen strip instead of withdrawing the window or intercepting clicks.
+        TOP/BOTTOM chooses a side, MOVE UP/DOWN adjusts in small increments,
+        and HIDE collapses the dock so no desktop control is ever trapped.
+        All movement is clamped inside the interactive work area.
         """
         self.root.update_idletasks()
         work = RECT()
@@ -487,11 +498,30 @@ class FireflyKeyboard:
         frame_w = max(0, outer.right - outer.left - (client.right - client.left))
         maximum = max(1, min(work_h - frame_h, int(work_h * MAX_DOCK_FRACTION) - frame_h))
         required = self.root.winfo_reqheight() + 2
-        height = min(maximum, required)
+        # The earlier 34% version made the letters cramped. The requested
+        # height is a floor for visible content; otherwise use ~43% of screen.
+        if self.collapsed:
+            height = min(maximum, required)
+        else:
+            height = min(maximum, max(required, int(work_h * DEFAULT_DOCK_FRACTION) - frame_h))
         width = max(1, work_w - frame_w)
-        y = work.top if self.dock_top else work.bottom - height - frame_h
-        self.root.minsize(min(620, width), min(44, maximum))
-        self.root.geometry(f"{width}x{height}+{work.left}+{max(work.top, y)}")
+        outer_height = height + frame_h
+        anchor = work.top if self.dock_top else work.bottom - outer_height
+        requested_y = anchor if self.dock_y is None else self.dock_y
+        y = clamp_dock_top(requested_y, work.top, work.bottom, outer_height)
+        if self.dock_y is not None:
+            self.dock_y = y
+        self._last_dock_top = y
+        self.root.minsize(min(620, width), min(36, maximum))
+        self.root.geometry(f"{width}x{height}+{work.left}+{y}")
+
+    def move_dock(self, direction: int) -> None:
+        """Reposition the keyboard without dragging (TV-remote friendly)."""
+        if direction not in (-1, 1):
+            return
+        self.dock_y = self._last_dock_top + direction * MOVE_STEP_PX
+        self._fit_window_to_content()
+        self._apply_no_activate()
 
     def _apply_no_activate(self) -> None:
         self.root.update_idletasks()
@@ -517,6 +547,8 @@ class FireflyKeyboard:
         self._tool_button(title, "SHOW" if self.collapsed else "HIDE",
                           self.toggle_collapse, LIME, 6).pack(side="left", padx=3)
         self._tool_button(title, "TOP/BOTTOM", self.toggle_dock, CYAN, 12).pack(side="left", padx=3)
+        self._tool_button(title, "MOVE ↑", lambda: self.move_dock(-1), CYAN, 7).pack(side="left", padx=2)
+        self._tool_button(title, "MOVE ↓", lambda: self.move_dock(1), CYAN, 7).pack(side="left", padx=2)
         if self.collapsed:
             # No modal hide: only these small controls remain and cannot
             # obstruct an otherwise unclickable control behind the keyboard.
@@ -1395,12 +1427,12 @@ class FireflyKeyboard:
 
     def toggle_size(self) -> None:
         self.scale = {1.0: 1.22, 1.22: 0.82}.get(self.scale, 1.0)
-        self._build()
-        self._fit_window_to_content()
-        self._apply_no_activate()
+        # Avoid destroying the SIZE button during its own Tk callback.
+        self.root.after_idle(self._rebuild_dock)
 
     def toggle_dock(self) -> None:
         self.dock_top = not self.dock_top
+        self.dock_y = None  # Explicitly choose the top/bottom edge again.
         self._fit_window_to_content()
         self._apply_no_activate()
 
