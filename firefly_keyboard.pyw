@@ -876,9 +876,11 @@ class FireflyKeyboard:
     def _invoke_layout_key(self, action: str) -> None:
         # Action is captured when the Tk button is created. Shift can change
         # the *label* in place, so resolve capitalization at activation time.
-        actual = (action.upper() if self.shifted and len(action) == 1
-                  and action.isalpha() else action)
-        signature = "key:" + action.lower() if len(action) == 1 and action.isalpha() else action
+        is_letter = len(action) == 1 and action.isalpha()
+        # A button built while Shift was ON may still have captured "A".
+        # After one-shot Shift clears, it must produce "a", not another "A".
+        actual = (action.upper() if self.shifted else action.lower()) if is_letter else action
+        signature = "key:" + action.lower() if is_letter else action
         self.activate(signature, lambda value=actual: self.key_action(value))
 
     def _build_keys(self) -> None:
