@@ -836,14 +836,30 @@ class FireflyKeyboard:
             child.destroy()
         self.nav_buttons = list(self.header_buttons) + list(self.quick_buttons) + list(self.suggestion_buttons)
         self.nav_selected = None
-        font_size = max(13, int(19 * self.scale))
+        font_size = max(10, int(15 * self.scale))
         # One text line keeps all four key rows plus navigation visible in the
         # compact remote-desktop dock. The surrounding frames provide the
         # touch target height by expanding into the available space.
         key_height = 1
+        # Reserve the utility footer BEFORE letter rows; keep it visible.
+        utility = tk.Frame(self.keyboard, bg=BG)
+        utility.pack(side="bottom", fill="x", pady=(1, 0))
+        utilities = [("CTRL●" if self.ctrl_held else "CTRL", "CTRL"),
+                     ("HOME", VK_HOME), ("END", VK_END), ("PG▲", VK_PRIOR), ("PG▼", VK_NEXT),
+                     ("▲", VK_UP), ("▼", VK_DOWN), ("DELETE", VK_DELETE), ("PASTE", "PASTE")]
+        for label, action in utilities:
+            active_modifier = action == "CTRL" and self.ctrl_held
+            button = tk.Button(utility, text=label, command=lambda a=action: self.activate(str(a), lambda: self.key_action(a)),
+                               bg=LIME if active_modifier else PANEL,
+                               fg=BG if active_modifier else MUTED,
+                               activebackground=KEY_ALT, activeforeground=INK,
+                               relief="flat", bd=0, padx=6, pady=2,
+                               font=("Segoe UI", 8, "bold"), takefocus=0)
+            self._register_nav_button(button, "key:" + str(action))
+            button.pack(side="left", expand=True, fill="x", padx=1)
         for row_num, row in enumerate(self._layout()):
             frame = tk.Frame(self.keyboard, bg=BG)
-            frame.pack(fill="both", expand=True, pady=4)
+            frame.pack(fill="both", expand=True, pady=1)
             for col, (label, action) in enumerate(row):
                 frame.grid_columnconfigure(col, weight=2 if action in ("SHIFT", "BACK", "MODE") else 1, uniform="keys")
                 button = tk.Button(frame, text=label, command=lambda a=action: self.activate(a, lambda: self.key_action(a)),
@@ -853,11 +869,11 @@ class FireflyKeyboard:
                                    height=key_height, font=("Segoe UI", font_size, "bold"), takefocus=0)
                 key_id = "key:" + (action.lower() if len(action) == 1 and action.isalpha() else action)
                 self._register_nav_button(button, key_id)
-                button.grid(row=0, column=col, sticky="nsew", padx=4)
+                button.grid(row=0, column=col, sticky="nsew", padx=2)
             frame.grid_rowconfigure(0, weight=1)
 
         frame = tk.Frame(self.keyboard, bg=BG)
-        frame.pack(fill="both", expand=True, pady=4)
+        frame.pack(fill="both", expand=True, pady=1)
         bottom = [
             ("123" if not self.symbols else "ABC", "MODE", 1, KEY_ALT),
             ("ESC", "VK:27", 1, KEY_ALT), ("TAB", "VK:9", 1, KEY_ALT),
@@ -871,27 +887,12 @@ class FireflyKeyboard:
             button = tk.Button(frame, text=label, command=lambda a=action: self.activate(a, lambda: self.key_action(a)),
                                bg=color, fg=fg, activebackground=LIME, activeforeground=BG,
                                relief="flat", bd=0, height=key_height,
-                               font=("Segoe UI", max(11, int(15 * self.scale)), "bold"), takefocus=0)
+                               font=("Segoe UI", max(9, int(12 * self.scale)), "bold"), takefocus=0)
             key_id = "key:" + (action.lower() if len(action) == 1 and action.isalpha() else action)
             self._register_nav_button(button, key_id)
-            button.grid(row=0, column=col, sticky="nsew", padx=4)
+            button.grid(row=0, column=col, sticky="nsew", padx=2)
         frame.grid_rowconfigure(0, weight=1)
 
-        utility = tk.Frame(self.keyboard, bg=BG)
-        utility.pack(fill="x", pady=(4, 0))
-        utilities = [("CTRL●" if self.ctrl_held else "CTRL", "CTRL"),
-                     ("HOME", VK_HOME), ("END", VK_END), ("PG▲", VK_PRIOR), ("PG▼", VK_NEXT),
-                     ("▲", VK_UP), ("▼", VK_DOWN), ("DELETE", VK_DELETE), ("PASTE", "PASTE")]
-        for label, action in utilities:
-            active_modifier = action == "CTRL" and self.ctrl_held
-            button = tk.Button(utility, text=label, command=lambda a=action: self.activate(str(a), lambda: self.key_action(a)),
-                               bg=LIME if active_modifier else PANEL,
-                               fg=BG if active_modifier else MUTED,
-                               activebackground=KEY_ALT, activeforeground=INK,
-                               relief="flat", bd=0, padx=13, pady=6,
-                               font=("Segoe UI", 9, "bold"), takefocus=0)
-            self._register_nav_button(button, "key:" + str(action))
-            button.pack(side="left", expand=True, fill="x", padx=3)
         restored = next((item for item in self.nav_buttons
                          if getattr(item, "_firefly_identity", None) == selected_id), None)
         if restored is not None:
