@@ -8,7 +8,7 @@ This program is operating inside an **Illinois AnyWare remote session**, possibl
 
 - **Does not close Windows On-Screen Keyboard (OSK)**, even when an old launcher accidentally passes `--replace-osk`.
 - **Does not install system-wide keyboard or mouse hooks** or block mouse/keyboard events elsewhere. The optional input inspector observes key state with a Tk timer; it cannot intercept the remote.
-- **Does not hide itself for one-shot mouse clicks**. The experimental `LEFT CLICK` / `RIGHT CLICK` conversion controls are deliberately unavailable in safe mode. Normal pointer clicks outside Firefly continue normally.
+- **Does not intercept mouse clicks or hold a mouse button while you navigate**. The `MOUSE` panel uses an explicit countdown to capture the remote pointer over a target, then injects a click or a short atomic drag. Ordinary pointer clicks outside Firefly continue normally.
 - Never auto-terminates an existing Firefly instance. A repeat launch returns to the existing window.
 - Never forces foreground focus on pointer leave or to deliver text. Click the actual target text field first, then type.
 - Shows a `SAFE · POINTER` indicator. If D-pad-only input does not behave like a pointer, the optional `--advanced-input` mode can **observe** directional keys by polling, but cannot swallow their underlying Windows events.
@@ -36,6 +36,10 @@ All movement uses normal window geometry, not global hooks, and doesn't affect t
 
 Idle opacity remains **24%** (hover **88%**). Transparency is only visual: the overlay continues to capture pointer clicks within its bounds, so MOVE or HIDE is the reliable way to reach a control behind it.
 
+## Menu debounce
+
+Tool buttons now have **per-control debouncing** rather than only checking the last action. Each menu control is guarded for **700 ms**; MOVE UP/DOWN use **360 ms** to allow repeated position adjustments. `HIDE` and `SHOW` share a stable debounce identity, so a duplicated remote OK cannot immediately reverse the toggle. Normal letter typing retains its separate 300 ms guard.
+
 ## Remote interaction
 
 - In **safe mode**, click/tap the visible Firefly keys using the remote-controlled pointer; the standard Windows input path handles remote clicks. The 300 ms identical-action guard mitigates accidentally doubled remote clicks, but can also suppress genuinely rapid repeated characters.
@@ -52,35 +56,13 @@ The **APPS** row opens `CMD`, `POWERSHELL`, `FILES`, `NOTEPAD`, `CHROME`, `RUN`,
 On shared/managed university desktops, installed apps and their permissions can differ from a personal Windows PC.
 
 
-## Click anywhere (advanced only)
+## Right-click, left-click and drag without stealing the remote
 
-Native pointer clicks already work **outside** the Firefly overlay and do not need mouse hooks. Firefly's one-shot LEFT/RIGHT CLICK controls are hidden in **safe mode**. In advanced polling mode, keyboard Enter/Space can trigger an injected click at the pointer position while the overlay is hidden; a normal pointer left-click passes through unchanged and does **not** generate a second click. Right-click conversion of a left-click is therefore not available without event interception.
+Open the **MOUSE** menu in Firefly's title row. These functions are available in normal safe mode; they use Windows `SendInput` and **do not require global hooks**.
 
-If the Citrix touch client exposes gestures, Citrix documents touch-hold-release for right-click. That gesture may **not** be available through a physical Fire TV remote. Avoid relying on experimental pointer-click conversion as your only way to operate AnyWare.
+**Click anywhere:** Press `RIGHT • 4.5s` or `LEFT • 4.5s`, then move the TV-controlled pointer **off Firefly and over the exact target**. After 4.5 seconds Firefly sends one corresponding mouse click there. **CANCEL / CLEAR** aborts a pending countdown. Aiming at Firefly itself cancels the action instead of clicking a menu button accidentally.
 
+**Drag between two desktop positions:** Press `DRAG FROM • 4.5s`, move the pointer to the drag start, and allow the countdown to capture it. Next press `DRAG TO • 4.5s`, move the pointer to the destination, and allow that countdown to capture the endpoint. Firefly inserts mouse-down, several moves and mouse-up in **one bounded SendInput batch**. It never intentionally keeps a button held between actions or while you move the TV remote. `CANCEL / CLEAR` discards a pending capture and its start position.
 
-## Predictive text
+Because the drag is a short synthesized sequence and not a physically held mouse button, some applications (including Citrix-hosted ones) may not recognize every drag. Windows may also deny input to elevated or secure surfaces, and a successful SendInput call does not prove the application acted. **Try a harmless file selection or text selection before relying on it for any consequential operation.** The regular OSK and Citrix input path remain available if Firefly exits.
 
-The three WORDS keys now use a bundled **9,000-word English frequency dictionary** (`data/en_9k.txt`, approximately 115 KB), indexed into an in-memory **prefix tree** at startup. This gives common-word completion without a network request, administrative installation or large model. The on-screen label shows the number of dictionary words loaded, so missing data is visible. Prioritize corpus frequency, locally learned word usage and preceding-word context; use spelling correction only when exact completions are insufficient. **Suggestions are never auto-inserted.**
-
-When a suggestion *completes* the existing prefix, Firefly sends only the missing suffix plus space, preserving already typed letters. When the suggestion is a correction, it sends a single ordered Windows input batch of Backspaces and replacement characters. **Neither case silently clears the predictor or learns the suggestion if SendInput reports failure.** This also avoids posting individual WM_CHAR messages to modern applications that may ignore them. Because Windows can accept input without the target consuming it, verify the result in the actual text field.
-
-The bundled dictionary is an adapted subset of [hermitdave/FrequencyWords](https://github.com/hermitdave/FrequencyWords), whose source data is **CC BY-SA 4.0**; attribution and changes are recorded in `data/ATTRIBUTION.md`. Learned words and word-pair counts are stored locally in `%LOCALAPPDATA%\FireflyDeskKeyboard\language.json` when Firefly closes normally. No cloud service is used. **Do not type secrets through the keyboard unless you accept that its local learning model can record the typed words.** The current model is intentionally lightweight; for larger vocabulary and typo correction, see [SymSpellPy](https://github.com/mammothb/symspellpy) and [Presage](https://presage.sourceforge.io/) as research directions, not installed dependencies.
-
-## Input diagnostics
-
-Safe mode preserves the Windows/remote-desktop event path and never consumes global mouse or keyboard events. `INSPECT` samples **virtual-key codes only** from the Tk event loop, without installing hooks. It cannot recover hardware scan codes or an event Citrix/Fire TV already transformed or discarded. Microsoft's `GetAsyncKeyState` API explicitly cautions that its recent-press bit is unreliable, so very brief taps may be missed.
-
-Text uses `SendInput` when Firefly's target is verified foreground, with targeted message fallback for compatible controls. A posted Win32 message does not prove a modern application accepted text. Always verify in the actual field, particularly in a terminal.
-
-
-## Useful upstream references
-
-- [Microsoft SendInput](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput) and [MOUSEINPUT](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-mouseinput): native keyboard and mouse event injection.
-- [Microsoft winappCli UI automation](https://github.com/microsoft/winappCli): target verification and transport tradeoffs; not required by Firefly.
-- [Flow Launcher](https://github.com/Flow-Launcher/Flow.Launcher): mature launcher ideas if a fuller app-search workflow becomes necessary.
-- [SymSpellPy](https://github.com/mammothb/symspellpy): frequency-aware typo correction for future predictor development.
-
-## Limits
-
-Only source-level review and a Windows import CI smoke workflow (where available) can be done without the actual interactive Windows/Fire TV session. A passing import alone does not establish safety or absence of thread-state crashes. Validate Shift → letter → Shift, Ctrl → Shift → C in a **non-destructive scratch editor**, launching CMD, and both one-shot click modes before relying on the revised program for critical work.
