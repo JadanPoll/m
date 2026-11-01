@@ -48,6 +48,50 @@ MAX_DOCK_FRACTION = 0.46  # Comfortable keys without monopolizing the screen.
 DEFAULT_DOCK_FRACTION = 0.43
 MOVE_STEP_PX = 72
 
+def choose_focus_neighbor(
+    positions: list[tuple[float, float, int]],
+    current: int,
+    direction: str,
+) -> int | None:
+    """Stable TV-style selection: horizontal stays in one row.
+
+    Positions contain (center_x, center_y, row_identity). Vertical movement
+    picks exactly one adjacent row, then the closest x in that row. This
+    avoids diagonal jumps between keyboard rows when pressing LEFT/RIGHT.
+    """
+    if not 0 <= current < len(positions):
+        return None
+    x0, y0, row0 = positions[current]
+    if direction in ("Left", "Right"):
+        sign = -1 if direction == "Left" else 1
+        choices = [
+            (sign * (x - x0), abs(y - y0), i)
+            for i, (x, y, row) in enumerate(positions)
+            if row == row0 and i != current and sign * (x - x0) > 2
+        ]
+        return min(choices)[2] if choices else None
+    if direction not in ("Up", "Down"):
+        return None
+    sign = -1 if direction == "Up" else 1
+    row_centers: dict[int, list[float]] = {}
+    for x, y, row in positions:
+        row_centers.setdefault(row, []).append(y)
+    adjacent = [
+        (sign * (sum(ys) / len(ys) - y0), row)
+        for row, ys in row_centers.items()
+        if row != row0 and sign * (sum(ys) / len(ys) - y0) > 2
+    ]
+    if not adjacent:
+        return None
+    target_row = min(adjacent)[1]
+    options = [
+        (abs(x - x0), abs(y - y0), i)
+        for i, (x, y, row) in enumerate(positions)
+        if row == target_row
+    ]
+    return min(options)[2] if options else None
+
+
 def clamp_dock_top(requested: int, work_top: int, work_bottom: int, outer_height: int) -> int:
     """Keep the entire movable keyboard visible inside the remote desktop."""
     return max(work_top, min(requested, max(work_top, work_bottom - outer_height)))
@@ -585,6 +629,8 @@ class FireflyKeyboard:
         self.pointer_nav_direction_active: str | None = None
         self.pointer_warp_until = 0.0
         self.pointer_warp_point: tuple[int, int] | None = None
+        self.pointer_settle_generation = 0
+        self.pointer_escape_until = 0.0
         self.last_ok_press: tuple[tuple[int, int] | None, float] = (None, 0.0)
         self.suppress_ok_once = False
         self.suppress_ok_until = 0.0
@@ -1413,17 +1459,40 @@ class FireflyKeyboard:
             return
         self.pointer_nav_lock_until = next_lock
         if action == "snap":
+            # IMPORTANT: do not call SetCursorPos for every raw Silk movement.
+            # Each call can re-enter through the browser as more pointer motion,
+            # turning a single held TV direction into an unstable feedback loop.
             if direction is not None:
                 self.mouse_motion_accum = [0, 0]
-            self._snap_pointer_to_selected()
             self._record_navigation_trace("snap", point[0] - previous[0], point[1] - previous[1], direction)
             return
         self.last_pointer_nav_at = now
         self.pointer_nav_direction_active = direction
         self.mouse_motion_accum = [0, 0]
-        self._navigate(direction)
+        moved = self._navigate(direction)
+        self.pointer_settle_generation += 1
+        if moved and now >= self.pointer_escape_until:
+            self._snap_pointer_to_selected()
+            generation = self.pointer_settle_generation
+            self.root.after(180, lambda token=generation: self._settle_pointer_to_selected(token))
+        else:
+            # At an outer boundary the user must be able to keep moving the
+            # remote cursor OFF the overlay. Do not trap them in Firefly.
+            self.pointer_escape_until = now + 0.85
+            self.pointer_nav_lock_until = 0.0
+            self.remote_nav_until = 0.0
+        self._record_navigation_trace(
+            "navigate" if moved else "edge-release",
+            point[0] - previous[0], point[1] - previous[1], direction,
+        )
+
+    def _settle_pointer_to_selected(self, generation: int) -> None:
+        """At most one delayed correction after a burst, never a motion loop."""
+        if (generation != self.pointer_settle_generation or
+                not self.pointer_inside or not self.nav_selected or
+                time.monotonic() < self.pointer_escape_until):
+            return
         self._snap_pointer_to_selected()
-        self._record_navigation_trace("navigate", point[0] - previous[0], point[1] - previous[1], direction)
 
     def _snap_pointer_to_selected(self) -> None:
         """Place the real pointer on the selected key so physical OK activates it."""
@@ -1436,7 +1505,7 @@ class FireflyKeyboard:
             button.winfo_rooty() + button.winfo_height() // 2,
         )
         self.pointer_warp_point = point
-        self.pointer_warp_until = time.monotonic() + 0.12
+        self.pointer_warp_until = time.monotonic() + 0.40
         self.last_mouse_point = point
         user32.SetCursorPos(*point)
 
@@ -1486,12 +1555,14 @@ class FireflyKeyboard:
             return
         self.pointer_inside = inside
         if inside:
+            self.pointer_escape_until = 0.0
             self.last_mouse_point = self.root.winfo_pointerxy()
             self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_ACTIVE)
             self._select_pointer_button()
             self.guard_var.set("D-PAD SNAP navigates · OK presses selected key")
         else:
+            self.pointer_settle_generation += 1
             self.last_mouse_point = None
             self.mouse_motion_accum = [0, 0]
             self.pointer_nav_direction_active = None
@@ -1520,48 +1591,37 @@ class FireflyKeyboard:
         except tk.TclError:
             pass
 
-    def _move_nav(self, direction: str) -> None:
+    def _move_nav(self, direction: str) -> bool:
+        """Move through focusable TV rows; return False at a real boundary."""
         buttons = [
-            button for button in self.nav_buttons
-            if button.winfo_exists() and button.winfo_ismapped() and str(button.cget("state")) != "disabled"
+            b for b in self.nav_buttons
+            if b.winfo_exists() and b.winfo_ismapped() and str(b.cget("state")) != "disabled"
         ]
         if not buttons:
-            return
+            return False
         if self.nav_selected not in buttons:
             self._select_pointer_button()
-            return
-        current = self.nav_selected
-        cx = current.winfo_rootx() + current.winfo_width() / 2
-        cy = current.winfo_rooty() + current.winfo_height() / 2
-        choices = []
-        for button in buttons:
-            if button is current:
-                continue
-            bx = button.winfo_rootx() + button.winfo_width() / 2
-            by = button.winfo_rooty() + button.winfo_height() / 2
-            dx, dy = bx - cx, by - cy
-            if direction == "Left" and dx < -2:
-                score = -dx + abs(dy) * 3
-            elif direction == "Right" and dx > 2:
-                score = dx + abs(dy) * 3
-            elif direction == "Up" and dy < -2:
-                score = -dy + abs(dx) * 3
-            elif direction == "Down" and dy > 2:
-                score = dy + abs(dx) * 3
-            else:
-                continue
-            choices.append((score, button))
-        if choices:
-            self._select_nav_button(min(choices, key=lambda item: item[0])[1])
+            return self.nav_selected in buttons
+        positions = [
+            (b.winfo_rootx() + b.winfo_width() / 2,
+             b.winfo_rooty() + b.winfo_height() / 2,
+             id(b.master))
+            for b in buttons
+        ]
+        index = choose_focus_neighbor(positions, buttons.index(self.nav_selected), direction)
+        if index is None:
+            return False
+        self._select_nav_button(buttons[index])
+        return True
 
-    def _navigate(self, direction: str) -> None:
-        now = time.perf_counter() * 1000
+    def _navigate(self, direction: str) -> bool:
+        now_ms = time.perf_counter() * 1000
         last_direction, last_at = self.last_nav_action
-        if direction == last_direction and now - last_at < NAV_GUARD_MS:
-            return
-        self.last_nav_action = (direction, now)
+        if direction == last_direction and now_ms - last_at < NAV_GUARD_MS:
+            return False
+        self.last_nav_action = (direction, now_ms)
         self.remote_nav_until = time.monotonic() + 1.4
-        self._move_nav(direction)
+        return self._move_nav(direction)
 
     def _on_navigation_key(self, event):
         if not self.pointer_inside:
