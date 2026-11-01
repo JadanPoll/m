@@ -177,13 +177,11 @@ class BITMAPINFOHEADER(ctypes.Structure):
 
 user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
 user32.SendInput.restype = wintypes.UINT
-HOOKPROC = ctypes.WINFUNCTYPE(LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-user32.SetWindowsHookExW.argtypes = (ctypes.c_int, HOOKPROC, wintypes.HINSTANCE, wintypes.DWORD)
-user32.SetWindowsHookExW.restype = wintypes.HANDLE
-user32.CallNextHookEx.argtypes = (wintypes.HANDLE, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM)
-user32.CallNextHookEx.restype = LRESULT
-user32.UnhookWindowsHookEx.argtypes = (wintypes.HANDLE,)
-user32.UnhookWindowsHookEx.restype = wintypes.BOOL
+# Keep input handling in the Tk event loop. Python ctypes Win32 hook
+# callbacks can re-enter Tk while its thread state is detached, and may crash
+# the interpreter (PyEval_RestoreThread). Do not register low-level hooks.
+user32.GetAsyncKeyState.argtypes = (ctypes.c_int,)
+user32.GetAsyncKeyState.restype = ctypes.c_short
 user32.OpenClipboard.argtypes = (wintypes.HWND,)
 user32.OpenClipboard.restype = wintypes.BOOL
 user32.GetClipboardData.argtypes = (wintypes.UINT,)
@@ -391,12 +389,9 @@ class FireflyKeyboard:
         self.learning_path = os.path.join(local_data, "FireflyDeskKeyboard", "language.json")
         self.nav_buttons: list[tk.Button] = []
         self.nav_selected: tk.Button | None = None
-        self.hook = None
-        self.hook_proc = HOOKPROC(self._keyboard_hook)
-        self.nav_hook = None
-        self.nav_hook_proc = HOOKPROC(self._navigation_hook)
-        self.mouse_hook = None
-        self.mouse_hook_proc = HOOKPROC(self._mouse_navigation_hook)
+        # All remote-input sampling happens on Tk's main thread; no ctypes
+        # callbacks, injected system hooks or Python/native re-entrancy.
+        self.remote_previous_down: dict[int, bool] = {}
         self.last_mouse_point: tuple[int, int] | None = None
         self.mouse_motion_accum = [0, 0]
         self.last_mouse_motion_at = 0.0
@@ -420,8 +415,7 @@ class FireflyKeyboard:
         self._build()
         self.root.after(150, self._apply_no_activate)
         if not self.safe_mode:
-            self.root.after(180, self._install_navigation_hook)
-            self.root.after(190, self._install_mouse_hook)
+            self.root.after(180, self._poll_remote_input)
         self.root.after(250, self._update_target)
         self.root.after(300, self._poll_pointer)
         self.root.protocol("WM_DELETE_WINDOW", self.request_close)
@@ -1020,172 +1014,70 @@ class FireflyKeyboard:
             return "break"
         return None
 
-    def _install_navigation_hook(self) -> None:
-        if not self.nav_hook:
-            self.nav_hook = user32.SetWindowsHookExW(
-                WH_KEYBOARD_LL, self.nav_hook_proc, kernel32.GetModuleHandleW(None), 0
-            )
+    def _poll_remote_input(self) -> None:
+        """Non-intercepting remote navigation; runs only on Tk's event loop.
 
-    def _install_mouse_hook(self) -> None:
-        if not self.mouse_hook:
-            self.mouse_hook = user32.SetWindowsHookExW(
-                WH_MOUSE_LL, self.mouse_hook_proc, kernel32.GetModuleHandleW(None), 0
-            )
+        GetAsyncKeyState reports the current down bit. It never takes ownership
+        of the real events or calls Python from a foreign Windows callback.
+        A remote client that only forwards mouse clicks may not expose VKs.
+        """
+        try:
+            virtual_keys = (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_RETURN,
+                            VK_SPACE, VK_ESCAPE, 0x01)
+            new_presses: set[int] = set()
+            for vk in virtual_keys:
+                down = bool(user32.GetAsyncKeyState(vk) & 0x8000)
+                if down and not self.remote_previous_down.get(vk, False):
+                    new_presses.add(vk)
+                self.remote_previous_down[vk] = down
 
-    def _mouse_navigation_hook(self, n_code, w_param, l_param):
-        """Capture one desktop click, or navigate Firefly while the pointer is inside."""
-        if n_code == HC_ACTION:
-            data = ctypes.cast(l_param, ctypes.POINTER(MSLLHOOKSTRUCT)).contents
-            # Injected clicks must always reach Windows, never be reinterpreted.
-            if data.flags & LLMHF_INJECTED:
-                return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
-            if self.pointer_suppress_up and w_param == WM_LBUTTONUP:
-                self.pointer_suppress_up = False
-                return 1
-            # WM_LBUTTONDBLCLK is the second press of a Windows double-click.
-            # It must not type the same on-screen key a second time.
-            if w_param == WM_LBUTTONDBLCLK and self.pointer_mode is None and self.pointer_inside:
-                return 1
-            if time.monotonic() < self.pointer_suppress_until and w_param in (
-                WM_LBUTTONDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONUP
-            ):
-                return 1
-            point = (int(data.pt.x), int(data.pt.y))
-            if self.pointer_mode is not None and w_param in (WM_LBUTTONDOWN, WM_LBUTTONDBLCLK):
-                if time.monotonic() < self.pointer_arm_after:
-                    return 1
-                side = self.pointer_mode
-                self.pointer_mode = None
-                self.pointer_suppress_up = True
-                self.pointer_suppress_until = time.monotonic() + 0.25
-                self.root.after(0, lambda which=side, at=point: self._complete_desktop_click(which, at))
-                return 1
-            if not self.pointer_inside:
-                return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
-            if w_param == WM_MOUSEMOVE:
-                previous = self.last_mouse_point
-                self.last_mouse_point = point
-                direction = None
-                if previous:
-                    dx, dy = point[0] - previous[0], point[1] - previous[1]
-                    now = time.monotonic()
-                    if now - self.last_mouse_motion_at > 0.45:
-                        self.mouse_motion_accum = [0, 0]
-                    self.last_mouse_motion_at = now
-                    self.mouse_motion_accum[0] += dx
-                    self.mouse_motion_accum[1] += dy
-                    ax, ay = self.mouse_motion_accum
-                    if max(abs(ax), abs(ay)) >= 2:
-                        if abs(ax) >= abs(ay):
-                            direction = "Right" if ax > 0 else "Left"
-                        else:
-                            direction = "Down" if ay > 0 else "Up"
-                        self.mouse_motion_accum = [0, 0]
-                self.root.after(
-                    0,
-                    lambda value=direction, position=point: self._handle_mouse_motion(position, value),
-                )
-            elif w_param == WM_LBUTTONDOWN:
-                # The remote sometimes emits two mouse-down events for one OK.
-                # Debounce only repeat events at nearly the same position.
-                old = self.last_pointer_activation
-                now = time.monotonic()
-                if old is None or now - old[1] > 0.34 or (
-                    abs(point[0] - old[0][0]) + abs(point[1] - old[0][1]) > 7
-                ):
-                    self.last_pointer_activation = (point, now)
-                    self.root.after(0, lambda position=point: self._invoke_pointer_button(position))
-                return 1
-            elif w_param == WM_LBUTTONUP:
-                return 1
-        return user32.CallNextHookEx(self.mouse_hook or 0, n_code, w_param, l_param)
-
-    def _handle_navigation_vk(self, vk: int) -> None:
-        directions = {VK_LEFT: "Left", VK_RIGHT: "Right", VK_UP: "Up", VK_DOWN: "Down"}
-        if vk in directions:
-            direction = directions[vk]
-            self._navigate(direction)
-        elif vk in (VK_RETURN, VK_SPACE) and self.nav_selected:
-            self.nav_selected.invoke()
-
-    def _navigation_hook(self, n_code, w_param, l_param):
-        if n_code == HC_ACTION:
-            data = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            if not (data.flags & LLKHF_INJECTED):
-                if self.pointer_suppress_key == data.vkCode and w_param in (WM_KEYUP, WM_SYSKEYUP):
-                    self.pointer_suppress_key = None
-                    return 1
-                if self.pointer_mode is not None and data.vkCode in (VK_RETURN, VK_SPACE, VK_ESCAPE):
-                    if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                        self.pointer_suppress_key = data.vkCode
-                        if data.vkCode != VK_ESCAPE and time.monotonic() < self.pointer_arm_after:
-                            return 1
-                        if data.vkCode == VK_ESCAPE:
-                            self.pointer_mode = None
-                            self.root.after(0, lambda: self._restore_after_click("Desktop click cancelled"))
-                        else:
-                            side = self.pointer_mode
-                            self.pointer_mode = None
-                            point = self.root.winfo_pointerxy()
-                            self.root.after(0, lambda which=side, at=point: self._complete_desktop_click(which, at))
-                    return 1
-            if not self.pointer_inside:
-                return user32.CallNextHookEx(self.nav_hook or 0, n_code, w_param, l_param)
-            navigation_keys = (VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_RETURN, VK_SPACE)
-            # Never consume Firefly's own injected key events. This allows the
-            # on-screen arrow/Enter buttons to reach the target application.
-            if data.vkCode in navigation_keys and not (data.flags & LLKHF_INJECTED):
-                if w_param in (WM_KEYDOWN, WM_SYSKEYDOWN):
-                    vk = int(data.vkCode)
-                    self.root.after(0, lambda value=vk: self._handle_navigation_vk(value))
-                return 1
-        return user32.CallNextHookEx(self.nav_hook or 0, n_code, w_param, l_param)
+            if self.pointer_mode is not None and time.monotonic() >= self.pointer_arm_after:
+                if VK_ESCAPE in new_presses:
+                    self.pointer_mode = None
+                    self._restore_after_click("Desktop click cancelled")
+                elif VK_RETURN in new_presses or VK_SPACE in new_presses:
+                    side = self.pointer_mode
+                    self.pointer_mode = None
+                    self._complete_desktop_click(side, self.root.winfo_pointerxy())
+                elif 0x01 in new_presses:
+                    # Without suppressing the physical left click, the target
+                    # has already received it. Never add an unexpected right
+                    # click or duplicate left click behind the user's back.
+                    self.pointer_mode = None
+                    self._restore_after_click(
+                        "Pointer click received normally; no extra click injected"
+                    )
+            elif self.pointer_inside and not self.pointer_mode:
+                for vk, direction in ((VK_LEFT, "Left"), (VK_RIGHT, "Right"),
+                                      (VK_UP, "Up"), (VK_DOWN, "Down")):
+                    if vk in new_presses:
+                        self._navigate(direction)
+                if (VK_RETURN in new_presses or VK_SPACE in new_presses) and self.nav_selected:
+                    self.nav_selected.invoke()
+            self.root.after(35, self._poll_remote_input)
+        except tk.TclError:
+            pass
 
     def _run_navigation_self_test(self) -> None:
-        """Exercise remote Right + Enter through the real hook callback path."""
+        """Exercise selection path without installing native hooks."""
         self.pointer_inside = True
-        first = next((button for button in self.nav_buttons if button.cget("text") == "q"), None)
-        if not first:
-            return
-        self._select_nav_button(first)
-        for vk in (VK_RIGHT, VK_RETURN):
-            event = KBDLLHOOKSTRUCT(vkCode=vk, scanCode=0, flags=0, time=0, dwExtraInfo=0)
-            self._navigation_hook(HC_ACTION, WM_KEYDOWN, ctypes.addressof(event))
+        first = next((b for b in self.nav_buttons if b.cget("text") == "q"), None)
+        if first:
+            self._select_nav_button(first)
+            self._navigate("Right")
 
     def _run_mouse_navigation_self_test(self) -> None:
-        """Exercise remote pointer-right + click through the real mouse hook."""
+        """Exercise pointer selection without a global mouse hook."""
         self.preview_hover = True
         self.pointer_inside = True
-        first = next((button for button in self.nav_buttons if button.cget("text") == "q"), None)
-        if not first:
-            return
-        self._select_nav_button(first)
-        self.last_mouse_point = (100, 100)
-        for x in (102, 104, 106):
-            move = MSLLHOOKSTRUCT(pt=POINT(x, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
-            self._mouse_navigation_hook(HC_ACTION, WM_MOUSEMOVE, ctypes.addressof(move))
-        click = MSLLHOOKSTRUCT(pt=POINT(106, 100), mouseData=0, flags=0, time=0, dwExtraInfo=0)
-        self.root.after(
-            100,
-            lambda: self._mouse_navigation_hook(
-                HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click)
-            ),
-        )
+        self._select_pointer_button()
 
     def _run_hover_click_self_test(self) -> None:
-        """Exercise one remote click on the key physically under the pointer."""
-        self.preview_hover = True
-        self.pointer_inside = True
-        self.root.update_idletasks()
-        button = next((item for item in self.nav_buttons if item.cget("text") == "w"), None)
-        if not button:
-            return
-        point = POINT(
-            button.winfo_rootx() + button.winfo_width() // 2,
-            button.winfo_rooty() + button.winfo_height() // 2,
-        )
-        click = MSLLHOOKSTRUCT(pt=point, mouseData=0, flags=0, time=0, dwExtraInfo=0)
-        self._mouse_navigation_hook(HC_ACTION, WM_LBUTTONDOWN, ctypes.addressof(click))
+        """Test a button action without synthesize/consume a mouse event."""
+        first = next((b for b in self.nav_buttons if b.cget("text") == "w"), None)
+        if first:
+            self._select_nav_button(first)
+            first.invoke()
 
     def _run_fast_navigation_self_test(self) -> None:
         """Exercise four rapid same-direction remote taps: q -> t."""
@@ -1398,37 +1290,10 @@ class FireflyKeyboard:
         self.root.after(500, self._update_target)
 
     def toggle_inspector(self) -> None:
-        if self.safe_mode:
-            self.guard_var.set("Inspector requires --advanced-input; safe mode is active")
-            return
-        if self.inspecting:
-            self.inspecting = False
-            if self.hook:
-                user32.UnhookWindowsHookEx(self.hook)
-                self.hook = None
-            self.inspect_button.configure(text="INSPECT", fg=LIME)
-            self.inspect_var.set("Inspector off — no input is being recorded")
-        else:
-            self.inspecting = True
-            self.event_rows.clear()
-            self.last_native_at = 0
-            self.hook = user32.SetWindowsHookExW(WH_KEYBOARD_LL, self.hook_proc, kernel32.GetModuleHandleW(None), 0)
-            self.inspect_button.configure(text="INSPECTING", fg=RED)
-            self.inspect_var.set("Press the unknown remote button once… (events are temporary and never saved)")
-
-    def _keyboard_hook(self, n_code, w_param, l_param):
-        if n_code == HC_ACTION and self.inspecting:
-            data = ctypes.cast(l_param, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
-            now = int(time.perf_counter() * 1000)
-            gap = 0 if not self.last_native_at else now - self.last_native_at
-            self.last_native_at = now
-            kind = {WM_KEYDOWN: "DOWN", WM_KEYUP: "UP", WM_SYSKEYDOWN: "SYS↓", WM_SYSKEYUP: "SYS↑"}.get(w_param, hex(w_param))
-            injected = " injected" if data.flags & LLKHF_INJECTED else " hardware"
-            row = f"{kind}  VK=0x{data.vkCode:02X} ({data.vkCode})  SCAN=0x{data.scanCode:02X}  flags=0x{data.flags:02X}  +{gap}ms{injected}"
-            self.event_rows.append(row)
-            self.event_rows = self.event_rows[-3:]
-            self.root.after(0, lambda: self.inspect_var.set("  |  ".join(self.event_rows)))
-        return user32.CallNextHookEx(self.hook or 0, n_code, w_param, l_param)
+        # The old WINFUNCTYPE-based keyboard inspector was removed because
+        # callbacks into Tk from low-level hooks can fatally corrupt thread
+        # state. A future non-intercepting inspector can use Raw Input.
+        self.guard_var.set("Inspector unavailable: unsafe global hook removed")
 
     def save_screenshot_bmp(self, path: str) -> None:
         """Capture this window to BMP and PNG without external packages."""
@@ -1483,12 +1348,6 @@ class FireflyKeyboard:
     def close(self) -> None:
         print("Firefly close() requested", flush=True)
         self._save_language_model()
-        if self.hook:
-            user32.UnhookWindowsHookEx(self.hook)
-        if self.nav_hook:
-            user32.UnhookWindowsHookEx(self.nav_hook)
-        if self.mouse_hook:
-            user32.UnhookWindowsHookEx(self.mouse_hook)
         self.root.destroy()
 
     def request_close(self) -> None:
