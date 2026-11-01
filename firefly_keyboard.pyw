@@ -1530,11 +1530,12 @@ if __name__ == "__main__":
             "FireflyDeskKeyboard",
         )
         os.makedirs(log_dir, exist_ok=True)
-        log_file = open(os.path.join(log_dir, "startup.log"), "w", encoding="utf-8", buffering=1)
-        sys.stderr = log_file
-        sys.stdout = log_file
+        log_file = open(os.path.join(log_dir, "startup.log"), "a", encoding="utf-8", buffering=1)
+        if "--debug-console" not in sys.argv:
+            sys.stderr = log_file
+            sys.stdout = log_file
         faulthandler.enable(file=log_file)
-        print("Firefly starting: " + sys.executable, flush=True)
+        print("\nFirefly starting: " + sys.executable, flush=True)
     except OSError:
         pass
     singleton = None
@@ -1550,11 +1551,13 @@ if __name__ == "__main__":
             keyboard = FireflyKeyboard()
             # Don't shut down Windows' fallback OSK before Firefly actually works.
             if "--replace-osk" in sys.argv:
-                keyboard.root.after(1200, close_windows_osk)
+                keyboard.root.after(10000, close_windows_osk)
             keyboard.run()
             print("Firefly mainloop exited normally", flush=True)
     except BaseException:
-        traceback.print_exc(file=sys.stderr)
+        traceback.print_exc(file=sys.stderr or log_file)
+        if log_file and sys.stderr is not log_file:
+            traceback.print_exc(file=log_file)
         if sys.stderr:
             sys.stderr.flush()
         # Emergency startup feedback without forcing a modal dialog.
