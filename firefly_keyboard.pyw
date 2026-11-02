@@ -1182,8 +1182,8 @@ class FireflyKeyboard:
             self.fast_nav_consumed_widget = button
             self.fast_nav_consume_release_until = time.monotonic() + 1.0
             return "break"
-        if not self.fast_nav_directional:
-            return None  # Still in intentional point-and-click/hover phase.
+        if not self.fast_nav_directional and button is not self.virtual_pointer:
+            return None  # Ordinary hover and pointer clicks seed the keyboard.
         if self.nav_selected and self.pointer_inside and not self.collapsed:
             # The click can land on a frame, label, or DIFFERENT key. Once a
             # direction selects logical focus, physical location is irrelevant
