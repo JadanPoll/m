@@ -1136,9 +1136,14 @@ class FireflyKeyboard:
         if not self.fast_nav_enabled:
             return None
         if button is self.fast_nav_button:
-            self.toggle_fast_nav()
-            # OFF is an emergency exit even if a release is delayed or the
-            # remote translates it into a second click at a different point.
+            now_ms = time.perf_counter() * 1000
+            # The remote may convert the release of the ON click into a
+            # second press. Keep ON/OFF under the SAME menu debounce identity.
+            if now_ms - self.menu_last_ms.get("tool:fast_nav", -1e9) >= MENU_GUARD_MS:
+                self.menu_last_ms["tool:fast_nav"] = now_ms
+                self.toggle_fast_nav()
+            else:
+                self.guard_var.set("FAST toggle duplicate ignored; press again to change")
             self.fast_nav_consumed_widget = button
             self.fast_nav_consume_release_until = time.monotonic() + 1.0
             return "break"
@@ -1742,6 +1747,8 @@ class FireflyKeyboard:
                 "FAST OFF: normal pointer clicking"
             )
         else:
+            if self.fast_nav_enabled:
+                self.guard_var.set("FAST: cursor left Firefly; OK outside acts normally")
             self.pointer_settle_generation += 1
             self.last_mouse_point = None
             self.mouse_motion_accum = [0, 0]
