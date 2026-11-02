@@ -607,6 +607,7 @@ class FireflyKeyboard:
         self.fast_nav_directional = False
         self.fast_nav_button: tk.Button | None = None
         self.fast_nav_consumed_widget = None
+        self.fast_nav_consume_release_until = 0.0
         self.fast_nav_last_ok_at = -100.0
         self.header_buttons: list[tk.Button] = []
         self.quick_buttons: list[tk.Button] = []
@@ -868,6 +869,7 @@ class FireflyKeyboard:
         self.keyboard = tk.Frame(self.root, bg=BG, padx=4, pady=1)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
+        self._install_fast_nav_bindtags(self.root)
 
     def _rebuild_dock(self) -> None:
         self._build()
@@ -1073,7 +1075,8 @@ class FireflyKeyboard:
 
     def _tool_button(self, parent, text, command, color, width):
         # HIDE/SHOW are a *single logical toggle*, even across widget rebuilds.
-        logical = "visibility" if text in ("HIDE", "SHOW") else text
+        logical = ("visibility" if text in ("HIDE", "SHOW") else
+                   "fast_nav" if text.startswith("FAST: ") else text)
         button = tk.Button(parent, text=text, command=lambda: self.activate("tool:" + logical, command),
                            bg=PANEL, fg=color, activebackground=KEY_ALT, activeforeground=INK,
                            relief="flat", bd=0, width=width, padx=5, pady=5,
@@ -1087,6 +1090,7 @@ class FireflyKeyboard:
         self.fast_nav_enabled = not self.fast_nav_enabled
         self.fast_nav_directional = False
         self.fast_nav_consumed_widget = None
+        self.fast_nav_consume_release_until = 0.0
         self.fast_nav_last_ok_at = -100.0
         self.pointer_nav_direction_active = None
         self.pointer_nav_lock_until = 0.0
@@ -1132,24 +1136,39 @@ class FireflyKeyboard:
         if not self.fast_nav_enabled:
             return None
         if button is self.fast_nav_button:
-            self.fast_nav_consumed_widget = button
             self.toggle_fast_nav()
-            # toggle_fast_nav clears the field; keep this release consumed.
+            # OFF is an emergency exit even if a release is delayed or the
+            # remote translates it into a second click at a different point.
             self.fast_nav_consumed_widget = button
+            self.fast_nav_consume_release_until = time.monotonic() + 1.0
             return "break"
         if not self.fast_nav_directional:
             return None  # Still in intentional point-and-click/hover phase.
-        if button in self.nav_buttons and not self.collapsed:
+        if self.nav_selected and self.pointer_inside and not self.collapsed:
+            # The click can land on a frame, label, or DIFFERENT key. Once a
+            # direction selects logical focus, physical location is irrelevant
+            # within Firefly. Never intercept a click in another application.
             self.fast_nav_consumed_widget = button
+            self.fast_nav_consume_release_until = time.monotonic() + 1.0
             self._fast_nav_selected_click()
-            return "break"  # Stop Tk from arming this *pointer* button.
+            return "break"
         return None
 
     def _on_fast_nav_release(self, event):
-        if event.widget is self.fast_nav_consumed_widget:
+        if (self.fast_nav_consumed_widget is not None and
+                time.monotonic() < self.fast_nav_consume_release_until):
             self.fast_nav_consumed_widget = None
-            return "break"  # Stop Tk from invoking the wrong pointer key.
+            self.fast_nav_consume_release_until = 0.0
+            return "break"  # Prevent the native Button release on another key.
+        self.fast_nav_consumed_widget = None
         return None
+
+    def _install_fast_nav_bindtags(self, widget) -> None:
+        """Capture first on all Firefly surfaces, before native Tk button code."""
+        if "FireflyFastNavClick" not in widget.bindtags():
+            widget.bindtags(("FireflyFastNavClick",) + widget.bindtags())
+        for child in widget.winfo_children():
+            self._install_fast_nav_bindtags(child)
 
     def _register_nav_button(self, button: tk.Button, identity: str | None = None) -> tk.Button:
         # Stable semantic identity survives recreating keys on Shift/Ctrl changes.
@@ -1482,6 +1501,7 @@ class FireflyKeyboard:
             self._register_nav_button(button, key_id)
             button.grid(row=0, column=col, sticky="nsew", padx=2)
         frame.grid_rowconfigure(0, weight=1)
+        self._install_fast_nav_bindtags(self.keyboard)
 
         restored = next((item for item in self.nav_buttons
                          if getattr(item, "_firefly_identity", None) == selected_id), None)
@@ -1717,7 +1737,10 @@ class FireflyKeyboard:
             self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_ACTIVE)
             self._select_pointer_button()
-            self.guard_var.set("D-PAD SNAP navigates · OK presses selected key")
+            self.guard_var.set(
+                "FAST: D-pad moves focus, OK selects it" if self.fast_nav_enabled else
+                "FAST OFF: normal pointer clicking"
+            )
         else:
             self.pointer_settle_generation += 1
             self.last_mouse_point = None
@@ -2245,6 +2268,8 @@ class FireflyKeyboard:
     def toggle_inspector(self) -> None:
         """Inspect VK state transitions without system hooks or Tk re-entrancy."""
         self.inspecting = not self.inspecting
+        if self.inspecting and self.fast_nav_enabled:
+            self.toggle_fast_nav()  # Inspection is observation-only, never an active lock.
         self.event_rows.clear()
         self.remote_previous_down.clear()
         self.capture_mouse_point = None
