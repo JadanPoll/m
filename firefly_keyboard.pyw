@@ -40,6 +40,7 @@ POINTER_NAV_LOCK_MS = 650
 POINTER_NAV_REPEAT_MS = 520
 POINTER_NAV_THRESHOLD_PX = 4
 GLOBAL_OK_GUARD_MS = 120
+FAST_NAV_OK_GUARD_MS = 260  # physical OK release can become another press in AnyWare
 BG = "#07111f"
 PANEL = "#0d1a2b"
 KEY = "#17304c"
@@ -600,6 +601,13 @@ class FireflyKeyboard:
         self.preview_hover = "--hover-preview" in sys.argv
         self.preview_idle = "--idle-preview" in sys.argv
         self.pointer_inside = False
+        # Opt-in, never persistent: restarting Firefly must restore ordinary
+        # point-and-click access, especially when the TV is the only input.
+        self.fast_nav_enabled = False
+        self.fast_nav_directional = False
+        self.fast_nav_button: tk.Button | None = None
+        self.fast_nav_consumed_widget = None
+        self.fast_nav_last_ok_at = -100.0
         self.header_buttons: list[tk.Button] = []
         self.quick_buttons: list[tk.Button] = []
         self.suggestion_buttons: list[tk.Button] = []
@@ -662,6 +670,13 @@ class FireflyKeyboard:
             self._start_capture_log()
         self._load_language_model()
         self._configure_window()
+        # A private Tk bindtag intercepts button-down BEFORE Tk's default
+        # Button class handler. Without this, the real pointer can still
+        # activate the WRONG key on button-up despite Firefly's green focus.
+        self.root.bind_class("FireflyFastNavClick", "<ButtonPress-1>",
+                             self._on_fast_nav_press)
+        self.root.bind_class("FireflyFastNavClick", "<ButtonRelease-1>",
+                             self._on_fast_nav_release)
         self._build()
         self._fit_window_to_content()
         self.root.bind_all("<Motion>", self._on_pointer_motion_event, add="+")
@@ -753,6 +768,10 @@ class FireflyKeyboard:
                  font=("Segoe UI", 10, "bold")).pack(side="left", padx=3)
         self._tool_button(title, "SHOW" if self.collapsed else "HIDE",
                           self.toggle_collapse, LIME, 6).pack(side="left", padx=3)
+        self.fast_nav_button = self._tool_button(
+            title, "FAST: ON" if self.fast_nav_enabled else "FAST: OFF",
+            self.toggle_fast_nav, LIME if self.fast_nav_enabled else CYAN, 10)
+        self.fast_nav_button.pack(side="left", padx=3)
         self._tool_button(title, "TOP/BOTTOM", self.toggle_dock, CYAN, 12).pack(side="left", padx=3)
         self._tool_button(title, "MOVE ↑", lambda: self.move_dock(-1), CYAN, 7).pack(side="left", padx=2)
         self._tool_button(title, "MOVE ↓", lambda: self.move_dock(1), CYAN, 7).pack(side="left", padx=2)
@@ -858,6 +877,9 @@ class FireflyKeyboard:
     def toggle_collapse(self) -> None:
         self.collapsed = not self.collapsed
         if self.collapsed:
+            # Hiding the keyboard must always release directional capture.
+            if self.fast_nav_enabled:
+                self.toggle_fast_nav()
             self._cancel_mouse_targeting()
         # Rebuild after the current Tk Button.invoke returns; destroying a
         # widget inside its own callback has caused remote instability before.
@@ -1060,6 +1082,75 @@ class FireflyKeyboard:
         self._register_nav_button(button)
         return button
 
+    def toggle_fast_nav(self) -> None:
+        """Reversible opt-in; OFF always means normal Windows pointer clicks."""
+        self.fast_nav_enabled = not self.fast_nav_enabled
+        self.fast_nav_directional = False
+        self.fast_nav_consumed_widget = None
+        self.fast_nav_last_ok_at = -100.0
+        self.pointer_nav_direction_active = None
+        self.pointer_nav_lock_until = 0.0
+        self.remote_nav_until = 0.0
+        self.mouse_motion_accum = [0, 0]
+        self.last_mouse_point = None
+        self.pointer_settle_generation += 1
+        self.pointer_warp_until = 0.0
+        if self.fast_nav_button and self.fast_nav_button.winfo_exists():
+            self.fast_nav_button.configure(
+                text="FAST: ON" if self.fast_nav_enabled else "FAST: OFF",
+                fg=LIME if self.fast_nav_enabled else CYAN,
+            )
+        self.guard_var.set(
+            "FAST ON: hover to start, D-pad moves focus, OK selects focus; "
+            "tap FAST: ON to exit"
+            if self.fast_nav_enabled else
+            "FAST OFF: ordinary pointer hover and clicks restored"
+        )
+
+    def _fast_nav_selected_click(self) -> None:
+        """One logical OK, only for clicks delivered inside Firefly."""
+        now = time.monotonic()
+        if now - self.fast_nav_last_ok_at < FAST_NAV_OK_GUARD_MS / 1000:
+            self.blocked += 1
+            self.guard_var.set("FAST: duplicated OK ignored")
+            return
+        selected = self.nav_selected
+        if not selected or not selected.winfo_exists() or not selected.winfo_ismapped():
+            return
+        self.fast_nav_last_ok_at = now
+        self._record_navigation_trace("fast-ok", 0, 0, None)
+        selected.invoke()  # Preserve existing per-action guards and learning.
+
+    def _on_fast_nav_press(self, event):
+        """Route physical OK to logical focus BEFORE Tk handles pointer click.
+
+        A Silk/Citrix pointer is not the highlight. Only reroute if a prior
+        directional action has made logical focus authoritative. Physical
+        clicking the FAST toggle always restores pointer mode immediately.
+        """
+        button = event.widget
+        if not self.fast_nav_enabled:
+            return None
+        if button is self.fast_nav_button:
+            self.fast_nav_consumed_widget = button
+            self.toggle_fast_nav()
+            # toggle_fast_nav clears the field; keep this release consumed.
+            self.fast_nav_consumed_widget = button
+            return "break"
+        if not self.fast_nav_directional:
+            return None  # Still in intentional point-and-click/hover phase.
+        if button in self.nav_buttons and not self.collapsed:
+            self.fast_nav_consumed_widget = button
+            self._fast_nav_selected_click()
+            return "break"  # Stop Tk from arming this *pointer* button.
+        return None
+
+    def _on_fast_nav_release(self, event):
+        if event.widget is self.fast_nav_consumed_widget:
+            self.fast_nav_consumed_widget = None
+            return "break"  # Stop Tk from invoking the wrong pointer key.
+        return None
+
     def _register_nav_button(self, button: tk.Button, identity: str | None = None) -> tk.Button:
         # Stable semantic identity survives recreating keys on Shift/Ctrl changes.
         button._firefly_identity = identity or ("label:" + str(button.cget("text")))
@@ -1070,6 +1161,11 @@ class FireflyKeyboard:
             "relief": button.cget("relief"), "bd": button.cget("bd"),
         }
         self.nav_buttons.append(button)
+        # Scoped to Firefly keys, not any other Windows application. The
+        # custom tag runs before Tk's Button bindings so a guest click can
+        # choose the *highlighted* key instead of its actual pointer target.
+        if "FireflyFastNavClick" not in button.bindtags():
+            button.bindtags(("FireflyFastNavClick",) + button.bindtags())
         button.configure(highlightthickness=0)
         button.bind("<Enter>", lambda _event, item=button: self._on_button_enter(item), add="+")
         return button
@@ -1426,7 +1522,9 @@ class FireflyKeyboard:
         )
 
     def _on_button_enter(self, button: tk.Button) -> None:
-        """Let real hover select, but never let remote drift steal the snap."""
+        """Hover may seed focus; once D-pad navigation begins it cannot steal it."""
+        if self.fast_nav_enabled and self.fast_nav_directional:
+            return
         if time.monotonic() < self.pointer_nav_lock_until and self.nav_selected:
             return
         self.remote_nav_until = 0.0
@@ -1442,6 +1540,8 @@ class FireflyKeyboard:
         return None
 
     def _select_pointer_button(self) -> None:
+        if self.fast_nav_enabled and self.fast_nav_directional:
+            return
         if time.monotonic() < self.remote_nav_until and self.nav_selected:
             return
         x, y = self.root.winfo_pointerxy()
@@ -1453,6 +1553,8 @@ class FireflyKeyboard:
             self._select_nav_button(self.nav_buttons[index])
 
     def _handle_mouse_motion(self, point: tuple[int, int], direction: str | None) -> None:
+        if self.fast_nav_enabled and self.fast_nav_directional and not direction:
+            return
         if direction:
             self._navigate(direction)
             return
@@ -1466,6 +1568,13 @@ class FireflyKeyboard:
         """Convert captured axis-only remote pointer bursts into one grid step."""
         point = (int(event.x_root), int(event.y_root))
         now = time.monotonic()
+        if not self.fast_nav_enabled:
+            # OFF is strictly pointer mode: no direction inference, no cursor
+            # warps, no focus locking or hidden input transformation.
+            self.last_mouse_point = point
+            self.mouse_motion_accum = [0, 0]
+            self._handle_mouse_motion(point, None)
+            return
         if self.capture_mode or self.inspecting:
             self.last_mouse_point = point
             self._handle_mouse_motion(point, None)
@@ -1499,7 +1608,8 @@ class FireflyKeyboard:
             self.remote_nav_until = 0.0
             self.pointer_nav_direction_active = None
             self.mouse_motion_accum = [0, 0]
-            self._handle_mouse_motion(point, None)
+            if not self.fast_nav_directional:
+                self._handle_mouse_motion(point, None)
             self._record_navigation_trace("hover", point[0] - previous[0], point[1] - previous[1], None)
             return
         self.pointer_nav_lock_until = next_lock
@@ -1513,13 +1623,15 @@ class FireflyKeyboard:
             return
         self.last_pointer_nav_at = now
         self.pointer_nav_direction_active = direction
+        self.fast_nav_directional = True
         self.mouse_motion_accum = [0, 0]
         moved = self._navigate(direction)
         self.pointer_settle_generation += 1
         if moved and now >= self.pointer_escape_until:
-            self._snap_pointer_to_selected()
-            generation = self.pointer_settle_generation
-            self.root.after(180, lambda token=generation: self._settle_pointer_to_selected(token))
+            # Do not warp the guest cursor to chase Silk's cursor: Silk can
+            # override it immediately. The owned logical focus is the only
+            # reliable indication of what the next *in-window* OK selects.
+            pass
         else:
             # At an outer boundary the user must be able to keep moving the
             # remote cursor OFF the overlay. Do not trap them in Firefly.
