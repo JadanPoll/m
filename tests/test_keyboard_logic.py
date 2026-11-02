@@ -223,6 +223,25 @@ class FireflyLogicTests(unittest.TestCase):
         self.assertEqual(keyboard.suggestions[:2], ["can", "are"])
         self.assertNotIn("the", keyboard.suggestions[:2])
 
+    def test_next_word_prefers_specific_association_over_global_filler(self):
+        # Real failure found in a user-flow sample: "open source" was displaced
+        # by "and" and "for" because unigrams dominated P(next|open).
+        static = ns["StaticNextWords"]
+        keyboard = Firefly.__new__(Firefly)
+        keyboard.corpus_counts = {"to": 2000, "source": 100, "and": 1000000}
+        keyboard.completion_index = {}
+        keyboard.words_by_first = {}
+        keyboard.learned_words = {}
+        keyboard.next_words = {}
+        keyboard.current_word = ""
+        keyboard.previous_word = "open"
+        keyboard.static_next_words = static({"open": (
+            ("to", 100), ("source", 90), ("and", 70),
+        )})
+        keyboard.suggestion_buttons = []
+        keyboard._update_suggestions()
+        self.assertEqual(keyboard.suggestions[:2], ["to", "source"])
+
     def test_sentence_end_drops_static_context_but_space_preserves_it(self):
         keyboard = Firefly.__new__(Firefly)
         keyboard.current_word = ""
