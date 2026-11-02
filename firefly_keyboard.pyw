@@ -41,6 +41,7 @@ POINTER_NAV_REPEAT_MS = 520
 POINTER_NAV_THRESHOLD_PX = 4
 GLOBAL_OK_GUARD_MS = 120
 FAST_NAV_OK_GUARD_MS = 260  # physical OK release can become another press in AnyWare
+FAST_NAV_ARM_QUIET_MS = 300  # hover to a key, briefly settle, then direction navigates
 BG = "#07111f"
 PANEL = "#0d1a2b"
 KEY = "#17304c"
@@ -605,6 +606,8 @@ class FireflyKeyboard:
         # point-and-click access, especially when the TV is the only input.
         self.fast_nav_enabled = False
         self.fast_nav_directional = False
+        self.fast_nav_ready_at = 0.0
+        self.virtual_pointer: tk.Label | None = None
         self.fast_nav_button: tk.Button | None = None
         self.fast_nav_consumed_widget = None
         self.fast_nav_consume_release_until = 0.0
@@ -758,6 +761,7 @@ class FireflyKeyboard:
         """Keep the common keyboard view compact; reveal apps only on demand."""
         for child in self.root.winfo_children():
             child.destroy()
+        self.virtual_pointer = None
         self.header_buttons = []
         self.quick_buttons = []
         self.suggestion_buttons = []
@@ -869,7 +873,15 @@ class FireflyKeyboard:
         self.keyboard = tk.Frame(self.root, bg=BG, padx=4, pady=1)
         self.keyboard.pack(fill="both", expand=True)
         self._build_keys()
+        # This is a Firefly-owned pointer, NOT the physical Windows cursor.
+        # It advertises which control will receive OK when FAST is active.
+        self.virtual_pointer = tk.Label(
+            self.root, text="◆", bg=CYAN, fg=BG,
+            font=("Segoe UI", 10, "bold"), relief="solid", bd=1,
+            padx=1, pady=0, takefocus=0,
+        )
         self._install_fast_nav_bindtags(self.root)
+        self._render_virtual_pointer()
 
     def _rebuild_dock(self) -> None:
         self._build()
@@ -1085,10 +1097,32 @@ class FireflyKeyboard:
         self._register_nav_button(button)
         return button
 
+    def _render_virtual_pointer(self) -> None:
+        """Draw an explicit, application-owned pointer over logical focus.
+
+        Never warp SetCursorPos. Silk owns the real pointer; Firefly owns this.
+        """
+        indicator = self.virtual_pointer
+        selected = self.nav_selected
+        if indicator is None or not indicator.winfo_exists():
+            return
+        if not self.fast_nav_enabled or not self.pointer_inside or self.collapsed:
+            indicator.place_forget()
+            return
+        if selected is None or not selected.winfo_exists() or not selected.winfo_ismapped():
+            indicator.place_forget()
+            return
+        root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
+        x = selected.winfo_rootx() - root_x + selected.winfo_width() - 3
+        y = selected.winfo_rooty() - root_y + 2
+        indicator.place(x=x, y=y, anchor="ne")
+        indicator.lift()
+
     def toggle_fast_nav(self) -> None:
         """Reversible opt-in; OFF always means normal Windows pointer clicks."""
         self.fast_nav_enabled = not self.fast_nav_enabled
         self.fast_nav_directional = False
+        self.fast_nav_ready_at = time.monotonic() + FAST_NAV_ARM_QUIET_MS / 1000
         self.fast_nav_consumed_widget = None
         self.fast_nav_consume_release_until = 0.0
         self.fast_nav_last_ok_at = -100.0
@@ -1104,8 +1138,9 @@ class FireflyKeyboard:
                 text="FAST: ON" if self.fast_nav_enabled else "FAST: OFF",
                 fg=LIME if self.fast_nav_enabled else CYAN,
             )
+        self._render_virtual_pointer()
         self.guard_var.set(
-            "FAST ON: hover to start, D-pad moves focus, OK selects focus; "
+            "FAST ON: hover a key, pause, D-pad moves ◆, OK selects ◆; "
             "tap FAST: ON to exit"
             if self.fast_nav_enabled else
             "FAST OFF: ordinary pointer hover and clicks restored"
@@ -1545,6 +1580,7 @@ class FireflyKeyboard:
             highlightthickness=3, highlightbackground=LIME,
             highlightcolor=LIME, relief="solid", bd=2,
         )
+        self._render_virtual_pointer()
 
     def _on_button_enter(self, button: tk.Button) -> None:
         """Hover may seed focus; once D-pad navigation begins it cannot steal it."""
@@ -1554,6 +1590,9 @@ class FireflyKeyboard:
             return
         self.remote_nav_until = 0.0
         self.pointer_nav_direction_active = None
+        if self.fast_nav_enabled and self.nav_selected is not button:
+            self.fast_nav_ready_at = time.monotonic() + FAST_NAV_ARM_QUIET_MS / 1000
+            self.mouse_motion_accum = [0, 0]
         self._select_nav_button(button)
 
     def _button_at_point(self, x: int, y: int) -> tk.Button | None:
@@ -1572,6 +1611,8 @@ class FireflyKeyboard:
         x, y = self.root.winfo_pointerxy()
         button = self._button_at_point(x, y)
         if button:
+            if self.fast_nav_enabled and not self.fast_nav_directional and button is not self.nav_selected:
+                self.fast_nav_ready_at = time.monotonic() + FAST_NAV_ARM_QUIET_MS / 1000
             self._select_nav_button(button)
         elif self.nav_buttons:
             index = min(len(self.header_buttons), len(self.nav_buttons) - 1)
@@ -1587,6 +1628,8 @@ class FireflyKeyboard:
             return
         button = self._button_at_point(*point)
         if button:
+            if self.fast_nav_enabled and not self.fast_nav_directional and button is not self.nav_selected:
+                self.fast_nav_ready_at = time.monotonic() + FAST_NAV_ARM_QUIET_MS / 1000
             self._select_nav_button(button)
 
     def _on_pointer_motion_event(self, event) -> None:
@@ -1607,6 +1650,14 @@ class FireflyKeyboard:
         if not self.pointer_inside:
             self._set_pointer_inside(True)
             self.last_mouse_point = point
+            return
+        if not self.fast_nav_directional and now < self.fast_nav_ready_at:
+            # A user is still moving the real pointer from the FAST control
+            # to the intended starting key. It must NOT be treated as D-pad
+            # navigation until hover has settled.
+            self.last_mouse_point = point
+            self.mouse_motion_accum = [0, 0]
+            self._handle_mouse_motion(point, None)
             return
         if (now < self.pointer_warp_until and self.pointer_warp_point and
                 abs(point[0] - self.pointer_warp_point[0]) <= 5 and
@@ -1738,17 +1789,23 @@ class FireflyKeyboard:
         self.pointer_inside = inside
         if inside:
             self.pointer_escape_until = 0.0
+            if self.fast_nav_enabled:
+                self.fast_nav_directional = False
+                self.fast_nav_ready_at = time.monotonic() + FAST_NAV_ARM_QUIET_MS / 1000
             self.last_mouse_point = self.root.winfo_pointerxy()
             self.mouse_motion_accum = [0, 0]
             self.root.attributes("-alpha", ALPHA_ACTIVE)
             self._select_pointer_button()
+            self._render_virtual_pointer()
             self.guard_var.set(
-                "FAST: D-pad moves focus, OK selects it" if self.fast_nav_enabled else
+                "FAST: D-pad moves ◆, OK selects ◆" if self.fast_nav_enabled else
                 "FAST OFF: normal pointer clicking"
             )
         else:
             if self.fast_nav_enabled:
                 self.guard_var.set("FAST: cursor left Firefly; OK outside acts normally")
+                self.fast_nav_directional = False
+            self._render_virtual_pointer()
             self.pointer_settle_generation += 1
             self.last_mouse_point = None
             self.mouse_motion_accum = [0, 0]
