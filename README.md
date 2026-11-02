@@ -44,11 +44,53 @@ Option controls also keep independent debounce history: toggles/actions such as 
 
 The remote's measured OK/Select signal is also guarded once at the Firefly-window level. A second left-button press within **120 ms** and 18 pixels of the first is discarded before any key command runs. This protects every Firefly control without installing a system-wide mouse hook or altering clicks in other Windows applications.
 
-## D-pad snap navigation
+## FAST navigation — explicit virtual pointer, normal pointer fallback
 
-The remote desktop converts D-pad taps into accelerated pointer motion instead of `VK_LEFT/RIGHT/UP/DOWN`. A real Firefly capture showed long same-axis streams such as `+8, +103, +4, +41, +2, +8`, not one tidy motion event. While the pointer is over Firefly, Firefly now keeps the pointer pinned to the selected key throughout a **650 ms rolling stream lock**. Same-direction holds repeat at a controlled **520 ms** rate, while an opposite or perpendicular direction responds immediately. A widget's ordinary mouse-enter event is forbidden from stealing an active snap. Once the stream ends, normal mouse hover takes over.
+**FAST: OFF is the startup default.** Firefly's header has an always-visible
+`FAST: OFF / FAST: ON` control. When OFF, hover and clicking use ordinary
+Windows pointer behavior; Firefly neither infers directions nor tries to move
+the real cursor. The Windows OSK fallback remains untouched.
 
-The selected or hovered control uses a complete **lime fill**, not only Tk's thin focus border, so the state remains visible through remote-desktop scaling and transparency.
+When FAST is ON, move the remote's real pointer to the starting keyboard key,
+pause briefly (~300 ms), then tap directional buttons. A cyan **◆** is the
+*virtual pointer controlled by Firefly*. It moves by discrete keys, regardless
+of Silk's inconsistent pixel displacement. A hollow **◇** means the pointer is
+still establishing its initial hover position. A held direction repeats on
+the existing controlled repeat interval. Once directional navigation starts,
+stray hover/mouse-enter events cannot steal the selection.
+
+**OK received anywhere inside Firefly is routed to the virtual pointer's
+selected action**, not necessarily the physical pointer location. Firefly
+intercepts its own Tk click before native Tk Button activation, and suppresses
+the paired release. Physical duplicates within 260 ms are suppressed in
+FAST mode; existing per-control action guards still apply. For example,
+if the blue ◆ points to `w` while Silk's real cursor remains over `q`,
+OK activates `w`.
+
+The virtual pointer does **not** replace the Windows pointer globally.
+If Silk carries its real cursor entirely outside the Firefly window, Windows
+clicks outside reach their ordinary targets, and Firefly cannot redirect them.
+Leaving Firefly resets the internal directional phase; re-enter and hover to
+re-establish the starting point. The **FAST: ON** toggle is the escape; choosing
+it through virtual navigation or returning to ordinary hovering and clicking
+turns FAST off. Hiding Firefly also exits FAST.
+
+This design preserves the reasons for the old D-pad machinery:
+captures showed highly variable accelerated axis-aligned motion streams such
+as `+8, +103, +4, +41, +2, +8`. The 650 ms stream lock and 520 ms controlled
+hold-repeat remain; the critical change is that the *real OS pointer* no
+longer needs to chase the selected key. This is a reversible opt-in because
+the remote-desktop behavior is not reliably reproducible without a TV.
+
+## Desktop-wide duplicated OK actions (optional)
+
+Firefly's own click handling does **not** debounce File Explorer and the
+rest of Windows. For this separate problem, see
+[Desktop OK debounce](docs/desktop-ok-debounce.md): two opt-in
+Start/Stop scripts for the already-existing open-source Windows Mouse
+Debouncer, with a configurable initial 220 ms left-click filter. No global
+hook, third-party executable, or driver is bundled or launched automatically.
+The separate filter has **not** been validated in Illinois AnyWare.
 
 ## Local prediction intelligence
 
