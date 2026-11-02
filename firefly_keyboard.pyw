@@ -1102,8 +1102,8 @@ class FireflyKeyboard:
 
         Never warp SetCursorPos. Silk owns the real pointer; Firefly owns this.
         """
-        indicator = self.virtual_pointer
-        selected = self.nav_selected
+        indicator = getattr(self, "virtual_pointer", None)
+        selected = getattr(self, "nav_selected", None)
         if indicator is None or not indicator.winfo_exists():
             return
         if not self.fast_nav_enabled or not self.pointer_inside or self.collapsed:
@@ -1170,9 +1170,10 @@ class FireflyKeyboard:
     def _on_fast_nav_press(self, event):
         """Route physical OK to logical focus BEFORE Tk handles pointer click.
 
-        A Silk/Citrix pointer is not the highlight. Only reroute if a prior
-        directional action has made logical focus authoritative. Physical
-        clicking the FAST toggle always restores pointer mode immediately.
+        A Silk/remote-desktop pointer is not the virtual ◆. Once directional
+        focus is active, a physical OK anywhere inside Firefly activates ◆.
+        The FAST toggle is clickable by the real cursor during hover setup,
+        or by navigating ◆ onto FAST and pressing OK.
         """
         button = event.widget
         if not self.fast_nav_enabled:
