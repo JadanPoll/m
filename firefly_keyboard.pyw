@@ -1115,11 +1115,18 @@ class FireflyKeyboard:
         root_x, root_y = self.root.winfo_rootx(), self.root.winfo_rooty()
         x = selected.winfo_rootx() - root_x + selected.winfo_width() - 3
         y = selected.winfo_rooty() - root_y + 2
+        indicator.configure(
+            text="◆" if self.fast_nav_directional else "◇",
+            bg=CYAN if self.fast_nav_directional else MUTED,
+        )
         indicator.place(x=x, y=y, anchor="ne")
         indicator.lift()
 
     def toggle_fast_nav(self) -> None:
         """Reversible opt-in; OFF always means normal Windows pointer clicks."""
+        if self.collapsed and not self.fast_nav_enabled:
+            self.guard_var.set("SHOW keyboard before enabling FAST navigation")
+            return
         self.fast_nav_enabled = not self.fast_nav_enabled
         self.fast_nav_directional = False
         self.fast_nav_ready_at = time.monotonic() + FAST_NAV_ARM_QUIET_MS / 1000
@@ -1170,7 +1177,7 @@ class FireflyKeyboard:
         button = event.widget
         if not self.fast_nav_enabled:
             return None
-        if button is self.fast_nav_button:
+        if button is self.fast_nav_button and not self.fast_nav_directional:
             now_ms = time.perf_counter() * 1000
             # The remote may convert the release of the ON click into a
             # second press. Keep ON/OFF under the SAME menu debounce identity.
@@ -1191,6 +1198,9 @@ class FireflyKeyboard:
             self.fast_nav_consumed_widget = button
             self.fast_nav_consume_release_until = time.monotonic() + 1.0
             self._fast_nav_selected_click()
+            # A selection can toggle FAST off and clear this guard itself.
+            self.fast_nav_consumed_widget = button
+            self.fast_nav_consume_release_until = time.monotonic() + 1.0
             return "break"
         return None
 
@@ -1702,6 +1712,12 @@ class FireflyKeyboard:
         self.fast_nav_directional = True
         self.mouse_motion_accum = [0, 0]
         moved = self._navigate(direction)
+        self._render_virtual_pointer()
+        if moved and self.nav_selected is not None:
+            self.guard_var.set(
+                "FAST ◆ " + str(self.nav_selected.cget("text"))[:22]
+                + " selected · OK activates ◆ · FAST: ON to exit"
+            )
         self.pointer_settle_generation += 1
         if moved and now >= self.pointer_escape_until:
             # Do not warp the guest cursor to chase Silk's cursor: Silk can
