@@ -1220,9 +1220,24 @@ class FireflyKeyboard:
                 ))
                 choices.extend(close[:3 - len(choices)])
         else:
+            # At a word boundary, use the actual preceding-word association
+            # FIRST. Reusing prefix-completion unigram ranking here made
+            # "open source" lose to generic frequent words ("and", "for"),
+            # even when the static context table ranked "source" second.
+            # Retain learned conditional evidence and the original fallback.
+            def next_word_rank(word: str) -> tuple:
+                if not static_words:
+                    return rank(word)
+                context_score = (
+                    10.0 * static_model.strength(self.previous_word, word)
+                    + 2.5 * math.log1p(context.get(word, 0))
+                    + 2.0 * math.log1p(self.learned_words.get(word, 0))
+                )
+                return (-context_score, *rank(word))
+
             choices = sorted(
                 {word for word in context if trusted_personal(word)} | static_words,
-                key=rank,
+                key=next_word_rank,
             )[:3]
             if len(choices) < 3:
                 defaults = ("the", "I", "you")
